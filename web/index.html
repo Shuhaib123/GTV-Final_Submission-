@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GTV — Demos</title>
+    <style>
+      body{font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial; margin:40px; color:#e6eefb; background:#0b1020}
+      a{color:#66c2ff; text-decoration:none}
+      a:hover{text-decoration:underline}
+      .card{background:#0d1429; border:1px solid #22305a; border-radius:10px; padding:14px 16px; margin:10px 0; max-width:600px}
+      .muted{color:#a8b3c7}
+    </style>
+  </head>
+  <body>
+    <h1>Go Trace Visualizer</h1>
+    <div class="card">
+      <h3><a href="/graph-live.html">Live Visualizer</a></h3>
+      <div class="muted">Streams events over WebSocket from the Go demo workload.</div>
+      <div class="muted" style="margin-top:8px">
+        Server flags:
+        <code>-addr :8080</code>, <code>-synth</code>, <code>-drop-block-no-ch</code><br/>
+        Env defaults: <code>GTV_ADDR</code>, <code>GTV_SYNTH_SEND</code>, <code>GTV_DROP_BLOCK_NO_CH</code>
+      </div>
+      <pre class="muted" style="white-space:pre-wrap;background:#0b152d;border:1px solid #22305a;padding:8px 10px;border-radius:8px;margin-top:8px">Examples:
+go run ./cmd/gtv-live -addr :9090 -synth -drop-block-no-ch
+GTV_SYNTH_SEND=1 go run ./cmd/gtv-live</pre>
+    </div>
+    <div class="card">
+      <h3><a href="/graph.html">Offline Visualizer</a></h3>
+      <div class="muted">Load <code>trace.json</code> produced by the offline parser.</div>
+      <pre class="muted" style="white-space:pre-wrap;background:#0b152d;border:1px solid #22305a;padding:8px 10px;border-radius:8px;margin-top:8px">Offline:
+go run .        # generates trace.out → trace.json
+open graph.html # load the JSON in the page</pre>
+    </div>
+    <div class="card">
+      <h3><a href="/instrument.html">Instrument & Run</a></h3>
+      <div class="muted">Paste a Go main program, generate a workload, and run once to get JSON.</div>
+    </div>
+  </body>
+ </html>

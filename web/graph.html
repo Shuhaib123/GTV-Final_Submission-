@@ -1,0 +1,1542 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+        <meta charset="utf-8" />
+        <title>Go Trace — Node Graph</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="stylesheet" href="base.css" />
+        <link rel="stylesheet" href="offline.css" />
+</head>
+
+<body>
+
+        <div id="graph"></div>
+
+        <div class="legend-area">
+                <div class="legend">
+                        <div><span class="swatch" style="background:var(--main)"></span>goroutine (main)</div>
+                        <div><span class="swatch" style="background:var(--worker)"></span>goroutine (worker)</div>
+                        <div><span class="swatch" style="background:var(--chan)"></span>channel</div>
+                        <div><span class="swatch" style="background:var(--cluster)"></span>cluster</div>
+                        <hr style="border:none;border-top:1px solid #223;margin:6px 0;">
+                        <div><span class="swatch" style="background:var(--edge-send)"></span>send</div>
+                        <div><span class="swatch" style="background:var(--edge-recv)"></span>recv</div>
+                        <div><span class="swatch" style="background:transparent;border:2px dashed var(--main)"></span>spawn</div>
+                        <div style="margin-top:6px"><span class="swatch"
+                                        style="background:transparent;border:2px dashed var(--blocked)"></span>goroutine had
+                                block/unblock</div>
+                </div>
+                <div class="notes-area">
+                        <button id="notesListButton" class="notes-button" type="button">
+                                Notes <span id="notesListCount" class="mini"></span>
+                        </button>
+                        <div id="notesPanel" class="notes-panel" aria-live="polite"></div>
+                </div>
+        </div>
+
+        <div class="hint">drag nodes · scroll to zoom · hover for details</div>
+
+        <div id="tooltip" class="tooltip" style="display:none"></div>
+        <!-- Options HUD (query-string driven, or inferred from JSON) -->
+        <div id="optsHUD" class="hint" style="top:14px; right:14px; bottom:auto">offline: synth: n/a • drop-no-ch: n/a</div>
+
+        <!-- Always-available loader at bottom-right -->
+        <div id="fileLoader" class="file-loader">
+                <label class="choose">
+                        Load JSON
+                        <input id="filePicker" type="file" accept="application/json,.json" style="display:none">
+                </label>
+                <button id="fitBtn" class="choose" style="margin-left:8px">Fit View</button>
+                <button id="downloadBtn" class="choose" style="margin-left:8px">Download PNG</button>
+                <button id="clearLayoutBtn" class="choose" style="margin-left:8px">Clear Layout</button>
+                <button id="themeBtn" class="choose" style="margin-left:8px">Theme</button>
+                <button id="styleBtn" class="choose" style="margin-left:8px">Style</button>
+                <label class="choose" style="margin-left:8px"><input id="pinToggle" type="checkbox"> Pin on drop</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleCreate" type="checkbox" checked> Create</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleNotes" type="checkbox"> Notes <span id="notesCount" class="mini"></span></label>
+                <label class="choose" style="margin-left:8px"><input id="toggleLabels" type="checkbox"> Labels</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleIDs" type="checkbox"> IDs</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleSynth" type="checkbox" checked> Synth edges</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleMainChan" type="checkbox"> Main↔Chan</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleELK" type="checkbox"> ELK layout</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleClusters" type="checkbox"> Clusters</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleBundle" type="checkbox"> Bundle</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleCausal" type="checkbox"> Causal</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleMsgOnly" type="checkbox"> Messages only</label>
+                <label class="choose" style="margin-left:8px"><input id="togglePairEdges" type="checkbox" checked> Pair edges</label>
+                <label class="choose" style="margin-left:8px"><input id="toggleSplit" type="checkbox"> Split P2P</label>
+        </div>
+
+        <!-- Theme apply early -->
+        <script>(function(){ try { if (localStorage.getItem('gtvTheme') === 'light') document.documentElement.classList.add('theme-light'); } catch {} })();</script>
+
+        <!-- Selection HUD -->
+        <div id="selHUD" class="selhud" style="display:none;position:absolute;right:14px;top:80px;background:#11162a;border:1px solid #223;padding:8px 10px;border-radius:8px;min-width:200px"></div>
+
+        <!-- Local file loader overlay (only shown when fetch fails) -->
+        <div id="dropzone" class="dropzone">
+                <div class="panel">
+                        <h3>Load trace.json</h3>
+                        <p>Drag & drop your trace.json here, or choose a file.</p>
+                        <label class="choose">
+                                Choose file
+                                <input id="fileInput" type="file" accept="application/json,.json" style="display:none">
+                        </label>
+                        <p style="opacity:.7;margin-top:10px">Tip: You can also serve this folder via <code>python -m http.server</code> and open graph.html over http.</p>
+                </div>
+        </div>
+
+        <!-- Optional layout engine (ELK.js) for layered layout on large graphs -->
+        <script src="https://cdn.jsdelivr.net/npm/elkjs/lib/elk.bundled.js"></script>
+        <!-- D3 v7 -->
+        <script src="https://unpkg.com/d3@7.9.0/dist/d3.min.js"></script>
+        <script>
+                let graphExtent = null;
+                const notesPanelEl = document.getElementById('notesPanel');
+                const notesToggleBtn = document.getElementById('notesListButton');
+                const notesCountBadge = document.getElementById('notesListCount');
+                function escapeHtml(str = '') {
+                        return String(str || '').replace(/[&<>"']/g, s => ({
+                                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+                        })[s]);
+                }
+                function formatNoteTime(ms) {
+                        const numeric = Number(ms);
+                        if (!Number.isFinite(numeric)) return 'n/a';
+                        return `${numeric}ms`;
+                }
+                function renderNotesPanel(entries) {
+                        if (!notesPanelEl) return;
+                        const list = Array.isArray(entries) ? entries : [];
+                        if (notesCountBadge) notesCountBadge.textContent = list.length ? `${list.length}` : '';
+                        if (!list.length) {
+                                notesPanelEl.innerHTML = '<div class="notes-panel-empty">No trace notes recorded.</div>';
+                                return;
+                        }
+                        notesPanelEl.innerHTML = list.map(entry => {
+                                const html = (entry.lines || []).map(escapeHtml).join('<br>');
+                                return `<div class="note-row"><span class="note-time">t=${formatNoteTime(entry.time_ms)}</span><span class="note-text">${html}</span></div>`;
+                        }).join('');
+                }
+                if (notesToggleBtn && notesPanelEl) {
+                        notesToggleBtn.addEventListener('click', () => {
+                                const visible = notesPanelEl.classList.toggle('open');
+                                notesToggleBtn.classList.toggle('active', visible);
+                        });
+                }
+                        (async function () {
+                        async function downloadPNG(filename = 'graph.png'){
+                                try {
+                                const svg = document.querySelector('#graph svg');
+                                if (!svg) return;
+                                const bbox = computeExportBBox(svg);
+                                        const width = Math.max(1, Math.ceil(bbox.width));
+                                        const height = Math.max(1, Math.ceil(bbox.height));
+                                        const clone = svg.cloneNode(true);
+                                        applyExportFilters(clone);
+                                        const props = ['fill','stroke','stroke-width','stroke-dasharray','stroke-linecap','stroke-linejoin','opacity','font-size','font-family','font-weight','text-anchor'];
+                                        (function copyStyles(orig, dup){
+                                                const apply = (o, c) => {
+                                                        if (!o || !c) return;
+                                                        const cs = getComputedStyle(o);
+                                                        props.forEach(p => { const v = cs.getPropertyValue(p); if (v) c.style.setProperty(p, v); });
+                                                        const oc = o.children || [], cc = c.children || [];
+                                                        for (let i=0; i<oc.length && i<cc.length; i++) apply(oc[i], cc[i]);
+                                                };
+                                                apply(svg, clone);
+                                        })(svg, clone);
+                                        try { const croot = clone.querySelector('g'); if (croot) croot.setAttribute('transform',''); clone.setAttribute('viewBox', `${bbox.x} ${bbox.y} ${Math.max(1,bbox.width)} ${Math.max(1,bbox.height)}`); } catch {}
+                                        clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+                                        clone.setAttribute('width', String(width));
+                                        clone.setAttribute('height', String(height));
+                                        const data = new XMLSerializer().serializeToString(clone);
+                                        const blob = new Blob([data], {type:'image/svg+xml;charset=utf-8'});
+                                        const url = URL.createObjectURL(blob);
+                                        const img = new Image();
+                                        await new Promise((res,rej)=>{ img.onload = res; img.onerror = rej; img.src = url; });
+                                        const scale = Math.max(2, window.devicePixelRatio||2);
+                                        const canvas = document.createElement('canvas');
+                                        canvas.width = width*scale; canvas.height = height*scale;
+                                        const ctx = canvas.getContext('2d');
+                                        ctx.fillStyle = getComputedStyle(document.body).backgroundColor || '#0b1020';
+                                        ctx.fillRect(0,0,canvas.width,canvas.height);
+                                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                        URL.revokeObjectURL(url);
+                                        canvas.toBlob((png)=>{
+                                                if (!png) return;
+                                                const a = document.createElement('a'); a.download = filename; a.href = URL.createObjectURL(png); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 500);
+                                        }, 'image/png');
+                                } catch (e) { console.warn('download PNG failed:', e); }
+                        }
+                        function computeExportBBox(svg) {
+                                const margin = 64;
+                                const rect = svg.getBoundingClientRect();
+                                let bbox = { x: 0, y: 0, width: rect.width, height: rect.height };
+                                const rootGroup = svg.querySelector('g');
+                                if (rootGroup) {
+                                        try {
+                                                const box = rootGroup.getBBox();
+                                                bbox = { x: box.x, y: box.y, width: box.width, height: box.height };
+                                        } catch {}
+                                }
+                                const extent = graphExtent || window._gtvGraphExtent;
+                                if (extent && extent.maxX > extent.minX && extent.maxY > extent.minY) {
+                                        bbox = {
+                                                x: extent.minX,
+                                                y: extent.minY,
+                                                width: extent.maxX - extent.minX,
+                                                height: extent.maxY - extent.minY
+                                        };
+                                }
+                                bbox.x -= margin;
+                                bbox.y -= margin;
+                                bbox.width += margin * 2;
+                                bbox.height += margin * 2;
+                                if (bbox.width <= 0) bbox.width = rect.width;
+                                if (bbox.height <= 0) bbox.height = rect.height;
+                                return bbox;
+                        }
+                        function applyExportFilters(clone) {
+                                const hideLabels = document.body.classList.contains('hide-edge-labels');
+                                const hideSynth = document.body.classList.contains('hide-synth');
+                                const showNotes = !!(document.getElementById('toggleNotes') && document.getElementById('toggleNotes').checked);
+                                if (hideLabels) {
+                                        clone.querySelectorAll('.edge-label').forEach(el => el.setAttribute('display', 'none'));
+                                }
+                                if (hideSynth) {
+                                        clone.querySelectorAll('.edge.synth, .edge-label.synth').forEach(el => el.setAttribute('display', 'none'));
+                                }
+                                if (!showNotes) {
+                                        clone.querySelectorAll('.node.note, .edge.ann').forEach(el => el.setAttribute('display', 'none'));
+                                }
+                        }
+                        // Style preset toggle (minimal vs default)
+                        function loadStyle(){ try { return localStorage.getItem('gtv.style')||'default'; } catch { return 'default'; } }
+                        function saveStyle(v){ try { localStorage.setItem('gtv.style', v); } catch {} }
+                        function applyStyle(){
+                                const s = loadStyle();
+                                document.body.classList.toggle('style-min', s === 'minimal');
+                        }
+                        applyStyle();
+                        // ELK preference
+                        function elkPref(){ try { return localStorage.getItem('gtv.elk') === '1'; } catch { return false } }
+                        // Edge IDs in labels preference
+                        function loadIDsPref(){ try { return localStorage.getItem('gtv.edge.ids') === '1'; } catch { return false } }
+                        function saveIDsPref(v){ try { localStorage.setItem('gtv.edge.ids', v ? '1' : '0'); } catch {} }
+                        function setElkPref(v){ try { localStorage.setItem('gtv.elk', v ? '1' : '0'); } catch {} }
+                        // Clusters preference
+                        function clustersPref(){ try { return localStorage.getItem('gtv.clusters.on') === '1'; } catch { return false } }
+                        function setClustersPref(v){ try { localStorage.setItem('gtv.clusters.on', v ? '1' : '0'); } catch {} }
+                        // Try to load trace.json via fetch. If it fails (file://), enable
+                        // a local loader that accepts drag-and-drop or file selection.
+                        try {
+                                const raw = await fetch('trace.json').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+                                const arr = Array.isArray(raw) ? raw : (raw.events || []);
+                                updateOptsHUDFromTrace(arr);
+                                render(arr);
+                        } catch (err) {
+                                console.warn('Failed to load trace.json:', err);
+                                enableLocalLoader();
+                                return; // do not proceed until a file is provided
+                        }
+
+                        // Setup persistent file loader so you can swap JSON without reloading.
+                        setupBottomLoader();
+                        // Default: hide labels for readability; toggle to show
+                        try { document.body.classList.add('hide-edge-labels'); } catch {}
+                        try { document.getElementById('toggleLabels').addEventListener('change', (e) => {
+                                document.body.classList.toggle('hide-edge-labels', !e.target.checked);
+                        }); } catch {}
+                        try { document.getElementById('toggleSynth').addEventListener('change', (e) => {
+                                document.body.classList.toggle('hide-synth', !e.target.checked);
+                        }); } catch {}
+                        // Theme button wiring
+                        try { document.getElementById('themeBtn').onclick = () => { const l = document.documentElement.classList.toggle('theme-light'); try { localStorage.setItem('gtvTheme', l ? 'light' : 'dark'); } catch {} }; } catch {}
+
+                        // Display options: synth/drop-no-ch (from query string or inferred from events)
+                        function updateOptsHUDFromTrace(arr) {
+                                try {
+                                        const params = new URLSearchParams(location.search);
+                                        const qs = (k) => { if (!params.has(k)) return null; const v = params.get(k); return v === '1' || v === 'true' || v === 'yes'; };
+                                        let synth = qs('synth');
+                                        const drop = qs('drop_block_no_ch');
+                                        if (synth === null) synth = !!arr.find(e => e && (e.source === 'synth' || e.Source === 'synth'));
+                                        const el = document.getElementById('optsHUD');
+                                        if (el) {
+                                                const synthTxt = synth === null ? 'n/a' : (synth ? 'on' : 'off');
+                                                const dropTxt = drop === null ? 'n/a' : (drop ? 'on' : 'off');
+                                                el.textContent = `offline: synth: ${synthTxt} • drop-no-ch: ${dropTxt}`;
+                                        }
+                                } catch {}
+                        }
+
+                        // Renders the graph for a given trace JSON array.
+                        function render(trace) {
+                                /*** ==== Build nodes & links from the json ==== ***/
+                        const goroutines = new Map();
+                        const channels = new Map();
+                        const depthByKey = new Map();
+                        const splitPref = (function(){ try { return localStorage.getItem('gtv.split') === '1'; } catch { return false } })();
+                        function stripSuffix(key) {
+                                if (!key) return key;
+                                const idx = key.indexOf('#g');
+                                if (idx >= 0 && idx + 2 < key.length) {
+                                        const tail = key.slice(idx + 2);
+                                        if (/^\d+$/.test(tail)) {
+                                                return key.slice(0, idx);
+                                        }
+                                }
+                                return key;
+                        }
+                        function labelPriority(lbl) {
+                                if (!lbl) return 0;
+                                const low = String(lbl).toLowerCase();
+                                if (low.startsWith('clientout')) return 40;
+                                if (low.startsWith('serverout')) return 35;
+                                if (low.startsWith('client')) return 25;
+                                if (low.startsWith('server')) return 20;
+                                if (low.startsWith('reg')) return 15;
+                                if (low.startsWith('join')) return 12;
+                                return 0;
+                        }
+                        function shortChannelPtr(ptr) {
+                                if (!ptr) return '';
+                                const match = /0x[0-9a-fA-F]+/.exec(ptr);
+                                if (match) return match[0];
+                                const eq = ptr.indexOf('=');
+                                if (eq >= 0) return ptr.slice(eq + 1);
+                                return String(ptr);
+                        }
+                        function channelIdentityForEvent(e) {
+                                if (!e) return undefined;
+                                if (e.ch_ptr) return e.ch_ptr;
+                                const candidate = e.channel_key || e.channel;
+                                if (!candidate) return undefined;
+                                return stripSuffix(candidate);
+                        }
+                        function channelLabelForEvent(e) {
+                                if (!e) return 'chan';
+                                if (e.channel) return e.channel;
+                                if (e.channel_key) return e.channel_key;
+                                if (e.ch_ptr) return e.ch_ptr;
+                                return 'chan';
+                        }
+                        function channelNodeId(e) {
+                                const key = channelIdentityForEvent(e);
+                                if (key) return `ch:${key}`;
+                                return `ch:${channelLabelForEvent(e) || 'chan'}`;
+                        }
+                        for (const e of trace) {
+                                if (e.g !== undefined && e.role) goroutines.set(e.g, { id: `g${e.g}`, label: `g${e.g}`, role: e.role, func: e.func });
+                                const key = channelIdentityForEvent(e);
+                                if (key) {
+                                        const id = channelNodeId(e);
+                                        let info = channels.get(key);
+                                        if (!info) {
+                                                info = {
+                                                        key,
+                                                        id,
+                                                        ptr: key && key.startsWith('ptr=') ? key : undefined,
+                                                        cap: undefined,
+                                                        elem_type: undefined,
+                                                        labelCounts: new Map()
+                                                };
+                                        }
+                                        if (!info.ptr && e.ch_ptr) info.ptr = e.ch_ptr;
+                                        info.id = id;
+                                        const label = channelLabelForEvent(e);
+                                        const candidates = new Set();
+                                        if (label) candidates.add(label);
+                                        if (e.channel) candidates.add(e.channel);
+                                        if (e.channel_key) candidates.add(e.channel_key);
+                                        candidates.forEach(lbl => {
+                                                if (!lbl) return;
+                                                info.labelCounts.set(lbl, (info.labelCounts.get(lbl) || 0) + 1);
+                                        });
+                                        if (e.event === 'chan_make') {
+                                                if (e.cap != null) info.cap = e.cap;
+                                                if (e.elem_type) info.elem_type = e.elem_type;
+                                        }
+                                        channels.set(key, info);
+                                }
+                                if (e.event === 'chan_depth') {
+                                        const k2 = channelIdentityForEvent(e);
+                                        if (k2) depthByKey.set(k2, e.value);
+                                }
+                        }
+
+                        const labelGroups = new Map();
+                        channels.forEach((info) => {
+                                if (!info.labelCounts || !info.labelCounts.size) {
+                                        const fallback = info.key || info.id || 'chan';
+                                        info.labelCounts = new Map([[fallback, 1]]);
+                                }
+                                const entries = Array.from(info.labelCounts.entries());
+                                entries.sort((a, b) => {
+                                        if (b[1] !== a[1]) return b[1] - a[1];
+                                        const pa = labelPriority(a[0]);
+                                        const pb = labelPriority(b[0]);
+                                        if (pb !== pa) return pb - pa;
+                                        if (a[0] < b[0]) return -1;
+                                        if (a[0] > b[0]) return 1;
+                                        return 0;
+                                });
+                                const best = entries[0] ? entries[0][0] : (info.key || info.id || 'chan');
+                                info.bestLabel = best;
+                                info.aliases = entries.slice(1).map(([lbl, cnt]) => ({ label: lbl, count: cnt }));
+                                info.displayLabel = best;
+                                info.shortLabel = best;
+                                const group = labelGroups.get(best) || [];
+                                group.push(info);
+                                labelGroups.set(best, group);
+                        });
+                        labelGroups.forEach((group) => {
+                                if (group.length <= 1) return;
+                                group.forEach(info => {
+                                        const ptr = info.ptr || (info.key && info.key.startsWith('ptr=') ? info.key : '');
+                                        const short = shortChannelPtr(ptr);
+                                        if (short) {
+                                                info.displayLabel = `${info.bestLabel}@${short}`;
+                                                info.shortLabel = info.displayLabel;
+                                        }
+                                });
+                        });
+
+                                const hadBlock = new Set(trace.filter(e => e.event === 'blocked_send').map(e => `g${e.g}`));
+
+                        const nodes = [];
+                        // ---- Clustering: group goroutines by function suffix (last two tokens) ----
+                        // Clustering default: if no explicit user pref, enable when graph is large.
+                        function hasClustersPref(){ try { return localStorage.getItem('gtv.clusters.on') !== null; } catch { return false } }
+                        const clustersOn = (function(){
+                                const el = document.getElementById('toggleClusters');
+                                if (el && typeof el.checked === 'boolean') {
+                                        // If user has a saved pref, reflect it into the checkbox.
+                                        const saved = clustersPref();
+                                        if (hasClustersPref()) { try { el.checked = saved; } catch {} }
+                                        // If no saved pref, choose based on size (>= 60 goroutines)
+                                        if (!hasClustersPref()) { const auto = goroutines.size >= 60; try { el.checked = auto; } catch {}; return auto }
+                                        return el.checked;
+                                }
+                                try {
+                                        if (hasClustersPref()) return clustersPref();
+                                        // No toggle element or pref: auto-enable for large graphs
+                                        return goroutines.size >= 60;
+                                } catch { return goroutines.size >= 60 }
+                        })();
+                        function clusterKeyOf(g){
+                                const parts = String(g.func||'').split('.');
+                                if (parts.length >= 2) return parts.slice(-2).join('.');
+                                if (parts.length === 1) return parts[0];
+                                return String(g.role||'worker');
+                        }
+                        function safeId(s){ return 'grp_' + String(s||'cluster').replace(/[^a-zA-Z0-9_]/g, '_'); }
+                        const clusterMap = new Map(); // key -> { id,label,members:[], role }
+                        goroutines.forEach((g, gid) => {
+                                if (!clustersOn) return; // clustering disabled
+                                if ((g.role||'').toLowerCase() === 'main') return; // never cluster main
+                                const key = clusterKeyOf(g);
+                                if (!clusterMap.has(key)) clusterMap.set(key, { key, id: safeId(key), label: key, members: [], role: (g.role||'worker') });
+                                clusterMap.get(key).members.push(`g${gid}`);
+                        });
+                        const minCluster = (function(){ try { return parseInt(localStorage.getItem('gtv.cluster.min')||'8',10)||8; } catch { return 8 } })();
+                        const clusters = Array.from(clusterMap.values()).filter(c => c.members.length >= minCluster);
+                        const memberToCluster = new Map();
+                        clusters.forEach(c => c.members.forEach(id => memberToCluster.set(id, c)));
+                        const expandedClusters = (function(){ try { return new Set(JSON.parse(localStorage.getItem('gtv.clusters.expanded')||'[]')); } catch { return new Set(); } })();
+                        function isCollapsedCluster(c){ return !expandedClusters.has(c.id); }
+
+                        const savedLayout = (function(){ try { return JSON.parse(localStorage.getItem('gtv.layout')||'{}'); } catch { return {}; } })();
+                        // Decide whether the graph should honor the saved/static coordinates instead of relying on the simulation.
+                        const staticLayout = (function(){
+                                try {
+                                        const params = new URLSearchParams(location.search);
+                                        if (params.get('layout') === 'static' || params.get('staticLayout') === '1') return true;
+                                } catch {}
+                                try { return Object.keys(savedLayout || {}).length > 0; } catch { return false; }
+                        })();
+                        // Add individual goroutines unless they belong to a collapsed cluster
+                        for (const [gid, g] of goroutines) {
+                                const id = `g${gid}`;
+                                const cl = memberToCluster.get(id);
+                                if (cl && isCollapsedCluster(cl)) continue;
+                                const pos = savedLayout[id] || {};
+                                nodes.push({ id, label: g.func ? `${g.label}\n${g.func}` : `${g.label} (${g.role})`, shortLabel: g.label, role: g.role, func: g.func, type: 'goroutine', blocked: hadBlock.has(`g${gid}`), x: pos.x, y: pos.y });
+                        }
+                        for (const [ch, c] of channels) {
+                                const pos = savedLayout[c.id] || {};
+                                const display = c.displayLabel || c.bestLabel || c.label || 'chan';
+                                const shortLabel = c.shortLabel || display;
+                                nodes.push({
+                                        id: c.id,
+                                        label: display,
+                                        shortLabel,
+                                        type: 'channel',
+                                        cap: c.cap,
+                                        depth: depthByKey.get(ch)||0,
+                                        elem_type: c.elem_type,
+                                        x: pos.x,
+                                        y: pos.y,
+                                        aliases: c.aliases || [],
+                                        ptr: c.ptr
+                                });
+                        }
+                        // Add cluster nodes for collapsed clusters (only when clustering is enabled)
+                        clusters.filter(isCollapsedCluster).forEach(c => {
+                                const pos = savedLayout[c.id] || {};
+                                nodes.push({ id: c.id, label: `${c.label} (${c.members.length})`, shortLabel: `${c.members.length}`, type: 'cluster', role: c.role, members: c.members.slice(), x: pos.x, y: pos.y });
+                        });
+
+                        // If there is no saved layout for some nodes, assign a simple layered deterministic layout
+                        ;(function layeredLayout(){
+                          const counts = { main:0, worker:0, chan:0 };
+                          function place(n){
+                            if (isFinite(n.x) && isFinite(n.y)) return;
+                            if (n.type === 'goroutine'){
+                              const role = (n.role||'').toLowerCase();
+                              if (role === 'main'){
+                                const i = counts.main++;
+                                n.fx = 200; n.fy = 120 + i*140;
+                              } else {
+                                const i = counts.worker++;
+                                n.fx = 900; n.fy = 120 + i*110;
+                              }
+                            } else if (n.type === 'channel'){
+                              const i = counts.chan++;
+                              const row = i % 2, col = Math.floor(i/2);
+                              n.fx = 520 + col*220; n.fy = row ? 420 : 240;
+                            }
+                            if (n.fx!=null && n.fy!=null){ n.x = n.fx; n.y = n.fy; }
+                          }
+                            nodes.forEach(place);
+                        })();
+
+                                (function updateGraphExtent() {
+                                        if (!nodes || nodes.length === 0) {
+                                                graphExtent = null;
+                                                window._gtvGraphExtent = null;
+                                                return;
+                                        }
+                                        const xs = nodes.filter(n => Number.isFinite(n.x)).map(n => n.x);
+                                        const ys = nodes.filter(n => Number.isFinite(n.y)).map(n => n.y);
+                                        if (!xs.length || !ys.length) {
+                                                graphExtent = null;
+                                                window._gtvGraphExtent = null;
+                                                return;
+                                        }
+                                        const padding = 96;
+                                        const minX = Math.min(...xs) - padding;
+                                        const maxX = Math.max(...xs) + padding;
+                                        const minY = Math.min(...ys) - padding;
+                                        const maxY = Math.max(...ys) + padding;
+                                        graphExtent = { minX, maxX, minY, maxY };
+                                        window._gtvGraphExtent = graphExtent;
+                                })();
+
+                                // Build annotations (non-channel events) as note nodes with dotted links.
+                                const noteEvents = new Set(['channels_created', 'worker_starting', 'goroutine_created', 'blocked_send', 'blocked_receive', 'unblocked', 'goroutine_started', 'select_begin', 'select_chosen', 'select_end', 'select_dropped', 'chan_close']);
+                                const annLinks = [];
+                                let noteIdx = 0;
+                                const noteEntries = [];
+                                for (const e of trace) {
+                                        if (e.channel || !noteEvents.has(e.event)) continue;
+                                        const gid = e.g;
+                                        const id = `note${++noteIdx}`;
+                                        let lines = [e.event];
+                                        if (e.func) lines.push(`func=${e.func}`);
+                                        if (e.select_id) lines.push(`sid=${e.select_id}`);
+                                        if (e.attempt_id) lines.push(`aid=${e.attempt_id}`);
+                                        lines.push(`t=${e.time_ms}ms`);
+                                        const label = lines.join('\n');
+                                        nodes.push({ id, label, shortLabel: e.event, type: 'note', time_ms: e.time_ms });
+                                        noteEntries.push({ id, time_ms: e.time_ms, lines: lines.slice() });
+                                        // Redirect to cluster if goroutine is hidden by a collapsed cluster
+                                        const tgt = (function(){
+                                                const gidStr = `g${gid}`;
+                                                const cl = memberToCluster && memberToCluster.get ? memberToCluster.get(gidStr) : null;
+                                                if (cl && (!expandedClusters || !expandedClusters.has || !expandedClusters.has(cl.id))) return cl.id;
+                                                return gidStr;
+                                        })();
+                                        annLinks.push({ id: `${id}->${tgt}#ann#${e.time_ms}`, source: id, target: tgt, kind: 'ann', meta: { time_ms: e.time_ms } });
+                                }
+                                noteEntries.sort((a, b) => (a.time_ms || 0) - (b.time_ms || 0));
+                                renderNotesPanel(noteEntries);
+
+                                function pushLink(acc, source, target, kind, e, seq) {
+                                        // Redirect goroutine endpoints to cluster if collapsed
+                                        function redirect(id){
+                                                if (typeof id !== 'string') return id;
+                                                if (id.startsWith('g')){
+                                                        const cl = memberToCluster && memberToCluster.get ? memberToCluster.get(id) : null;
+                                                        if (cl && (!expandedClusters || !expandedClusters.has || !expandedClusters.has(cl.id))) return cl.id;
+                                                }
+                                                return id;
+                                        }
+                                        source = redirect(source);
+                                        target = redirect(target);
+                                        acc.push({
+                                                id: `${source}->${target}#${kind}#${e.time_ms}`,
+                                                source, target, kind,
+                                                meta: { time_ms: e.time_ms, value: e.value, event: e.event, channel: e.channel, ch_ptr: e.ch_ptr, channel_key: e.channel_key, msg_id: e.msg_id, seq, src: (e.source || e.Source) }
+                                        });
+                                }
+
+                                let links = [];
+                                // Map attempt_id -> select_id and select summaries for HUD/labels
+                                const attemptToSelect = new Map();
+                                const selectSummary = new Map(); // sid -> { chosen:string|null, dropped:string[] }
+                                try {
+                                        for (const e of trace) {
+                                                if ((e.event === 'select_chosen' || e.event === 'select_dropped') && e.attempt_id) {
+                                                        const sid = e.select_id || '';
+                                                        attemptToSelect.set(e.attempt_id, sid);
+                                                        if (!selectSummary.has(sid)) selectSummary.set(sid, { chosen: null, dropped: [] });
+                                                        const sum = selectSummary.get(sid);
+                                                        if (e.event === 'select_chosen') sum.chosen = e.attempt_id;
+                                                        else sum.dropped.push(e.attempt_id);
+                                                }
+                                        }
+                                } catch {}
+                                // Prefer atomic attempt/commit path when present; otherwise fall back to legacy.
+                                const hasAtomic = !!trace.find(e => e && typeof e.event === 'string' && /^chan_/.test(e.event));
+                                const messageEdges = [];
+                                const msgSendMap = new Map();
+                                const seenMsgIDs = new Set();
+                                if (hasAtomic) {
+                                        const attemptEdges = new Map(); // attempt_id -> link obj
+                                        const chanSeq = new Map(); // channel -> seq counter
+                                        function nextSeq(ch){ const n=(chanSeq.get(ch)||0)+1; chanSeq.set(ch,n); return n; }
+                                const addEdge = (source, target, kind, e, flags) => {
+                                        const key = channelIdentityForEvent(e);
+                                        if (!key) return null;
+                                        const seq = nextSeq(key);
+                                        pushLink(links, source, target, kind, e, seq);
+                                                const L = links[links.length-1];
+                                                if (flags && flags.tentative) L.tentative = true;
+                                                if (flags && flags.commit) L.commit = true;
+                                                if (!L.meta) L.meta = {};
+                                                if (e.id) L.meta.attempt_id = e.id;
+                                                if (e.attempt_id) L.meta.attempt_id = e.attempt_id;
+                                                if (e.msg_id) L.meta.msg_id = e.msg_id;
+                                                if (e.id && flags && flags.commit) L.meta.commit_id = e.id;
+                                                if (e.peer_g) L.meta.peer_g = e.peer_g;
+                                                return L;
+                                        };
+                                        for (const e of trace) {
+                                                const ev = String(e.event||'');
+                                                if (!/^chan_/.test(ev)) continue;
+                                                const key = channelIdentityForEvent(e); if (!key) continue;
+                                                switch (ev) {
+                                                case 'chan_send_attempt': {
+                                                        const chId = channelNodeId(e);
+                                                        const L = addEdge(`g${e.g}`, chId, 'send', e, {tentative:true});
+                                                        if (e.id) attemptEdges.set(e.id, L);
+                                                        break;
+                                                }
+                                        case 'chan_send_commit': {
+                                                const key2 = e.attempt_id; let L = key2 ? attemptEdges.get(key2) : null;
+                                                if (L) { L.tentative = false; L.commit = true; if (!L.meta) L.meta={}; L.meta.commit_id = e.id; }
+                                                else {
+                                                        // Commit seen first (or attempt not recorded); create committed edge.
+                                                        const chId = channelNodeId(e);
+                                                        L = addEdge(`g${e.g}`, chId, 'send', e, {commit:true});
+                                                }
+                                                break;
+                                                }
+                                        case 'chan_recv_attempt': {
+                                                        const chId = channelNodeId(e);
+                                                        const L = addEdge(chId, `g${e.g}`, 'recv', e, {tentative:true});
+                                                        if (e.id) attemptEdges.set(e.id, L);
+                                                        break;
+                                                }
+                                        case 'chan_recv_commit': {
+                                                const key2 = e.attempt_id; let L = key2 ? attemptEdges.get(key2) : null;
+                                                if (L) { L.tentative = false; L.commit = true; if (!L.meta) L.meta={}; L.meta.commit_id = e.id; if (e.peer_g) L.meta.peer_g = e.peer_g; }
+                                                else {
+                                                        const chId = channelNodeId(e);
+                                                        L = addEdge(chId, `g${e.g}`, 'recv', e, {commit:true});
+                                                }
+                                                break;
+                                        }
+                                        case 'chan_send': {
+                                                if (e.msg_id) msgSendMap.set(e.msg_id, e.g);
+                                                break;
+                                        }
+                                        case 'chan_recv': {
+                                                if (e.msg_id && !seenMsgIDs.has(e.msg_id)) {
+                                                        const srcG = (typeof e.peer_g === 'number' && e.peer_g > 0) ? e.peer_g : msgSendMap.get(e.msg_id);
+                                                        if (srcG != null && e.g != null) {
+                                                                const src = `g${srcG}`;
+                                                                const tgt = `g${e.g}`;
+                                                                messageEdges.push({
+                                                                        id: `${src}->${tgt}#message#${e.msg_id}`,
+                                                                        source: src,
+                                                                        target: tgt,
+                                                                        kind: 'message',
+                                                                        meta: { msg_id: e.msg_id, channel: e.channel || e.channel_key }
+                                                                });
+                                                                seenMsgIDs.add(e.msg_id);
+                                                        }
+                                                }
+                                                break;
+                                        }
+                                        default:
+                                                break;
+                                        }
+                                        }
+                                } else {
+                                        const ops = trace.filter(e => e.channel);
+                                        const base = {};
+                                        const keyOf = (e) => channelIdentityForEvent(e) || e.channel;
+                                        for (const e of ops) {
+                                                const t = e.time_ms;
+                                                const key = keyOf(e);
+                                                if (!key) continue;
+                                                base[key] = base[key] === undefined ? t : Math.min(base[key], t);
+                                        }
+                                        ops.sort((a, b) => {
+                                                const ba = base[keyOf(a)], bb = base[keyOf(b)];
+                                                if (ba !== bb) return ba - bb;
+                                                if (a.channel === b.channel) {
+                                                        const isSendA = /(^|_)send($|_)/.test(a.event);
+                                                        const isSendB = /(^|_)send($|_)/.test(b.event);
+                                                        if (isSendA !== isSendB) return isSendA ? -1 : 1;
+                                                }
+                                                return a.time_ms - b.time_ms;
+                                        });
+                                        const drawnKeys = new Set();
+                                        ops.forEach((e, i) => {
+                                                const ev = e.event;
+                                                const seq = i + 1;
+                                                const isSend = /(^|_)send($|_)/.test(ev);
+                                                const isRecv = /(^|_)recv($|_)/.test(ev);
+                                                const role = isSend ? 'send' : (isRecv ? 'recv' : '');
+                                                if (!role) return;
+                                                const chKey = keyOf(e);
+                                                if (!chKey) return;
+                                                const key = `${role}:${e.g}:${chKey}`;
+                                                const isComplete = /complete/.test(ev);
+                                                if (isComplete && drawnKeys.has(key)) return;
+                                                const chId = `ch:${chKey}`;
+                                                if (!drawnKeys.has(key)) {
+                                                        if (isSend) pushLink(links, `g${e.g}`, chId, 'send', e, seq);
+                                                        else pushLink(links, chId, `g${e.g}`, 'recv', e, seq);
+                                                        drawnKeys.add(key);
+                                                }
+                                        });
+                                }
+
+                                // Add spawn edges from go_start to visualize parent→child when available (fallback to main as parent).
+                                try {
+                                        const mainNode = nodes.find(n => n.type==='goroutine' && (n.role||'').toLowerCase()==='main');
+                                        for (const e of trace) {
+                                                if (!e || e.event !== 'go_start') continue;
+                                                const child = `g${e.g}`;
+                                                const parent = (e.parent_g && e.parent_g>0) ? `g${e.parent_g}` : (mainNode ? mainNode.id : null);
+                                                if (!parent) continue;
+                                                links.push({ id: `${parent}->${child}#spawn#${e.time_ms}`, source: parent, target: child, kind: 'spawn', meta: { time_ms: e.time_ms, event: 'spawn' } });
+                                        }
+                                } catch {}
+
+                                // Light create links from main to channels (visual only).
+                                function findChannelIdByLabel(label) {
+                                        for (const info of channels.values()) {
+                                                if (info.bestLabel === label) return info.id;
+                                                if (info.aliases && info.aliases.some(a => a.label === label)) return info.id;
+                                        }
+                                        return null;
+                                }
+                                const chCreated = trace.find(e => e.event === 'channels_created');
+                                const createLinks = [];
+                                if (chCreated) {
+                                        const t = chCreated.time_ms || 0;
+                                        const mainG = `g${chCreated.g}`;
+                                        const pingId = findChannelIdByLabel('ping');
+                                        if (pingId) createLinks.push({ id: `${mainG}->${pingId}#create#${t}`, source: {id: mainG}, target: {id: pingId}, kind: 'create', meta: { time_ms: t, event: 'create', channel: 'ping' } });
+                                        const pongId = findChannelIdByLabel('pong');
+                                        if (pongId) createLinks.push({ id: `${mainG}->${pongId}#create#${t}`, source: {id: mainG}, target: {id: pongId}, kind: 'create', meta: { time_ms: t, event: 'create', channel: 'pong' } });
+                                }
+
+                                const hasReverse = new Set(links.map(l => `${(typeof l.target==='string'?l.target:l.target.id)}::${(typeof l.source==='string'?l.source:l.source.id)}`));
+                                links.forEach(l => { const s=(typeof l.source==='string'?l.source:l.source.id), t=(typeof l.target==='string'?l.target:l.target.id); l.curve = hasReverse.has(`${t}::${s}`) ? 28 : 0; });
+
+                                // Compute deltas between consecutive channel ops (by logical sequence).
+                                for (let i = 0; i < links.length; i++) {
+                                        links[i].meta.delta = i > 0 ? (links[i].meta.time_ms - links[i-1].meta.time_ms) : null;
+                                }
+                                // After links exist, optionally refine layout with a BFS layering to reduce crossings.
+                                ;(function relayer(){
+                                        try {
+                                                const idOf = (x) => typeof x === 'string' ? x : x.id;
+                                                const adj = new Map(), indeg = new Map();
+                                                nodes.forEach(n => { adj.set(n.id, new Set()); indeg.set(n.id, 0); });
+                                                links.forEach(e => { const s = idOf(e.source), t = idOf(e.target); if (adj.has(s)) adj.get(s).add(t); if (indeg.has(t)) indeg.set(t, (indeg.get(t)||0)+1); });
+                                                const q = [], level = new Map();
+                                                nodes.forEach(n => { if (n.type==='goroutine' && (n.role||'').toLowerCase()==='main') { level.set(n.id,0); q.push(n.id); } });
+                                                if (q.length===0) nodes.forEach(n => { if ((indeg.get(n.id)||0)===0) { level.set(n.id,0); q.push(n.id); } });
+                                                while(q.length){ const v=q.shift(); const lv=level.get(v)||0; (adj.get(v)||[]).forEach(w => { if (!level.has(w)) { level.set(w, lv+1); q.push(w); } }); }
+                                                const byLev = new Map();
+                                                nodes.forEach(n => { const lv = level.has(n.id) ? level.get(n.id) : 0; if (!byLev.has(lv)) byLev.set(lv, []); byLev.get(lv).push(n); });
+                                                const x0=160, dx=220, y0=120, dy=110;
+                                                Array.from(byLev.keys()).sort((a,b)=>a-b).forEach(lv => {
+                                                        const arr = byLev.get(lv);
+                                                        arr.forEach((n,i) => { n.fx = x0 + lv*dx; n.fy = y0 + i*dy; n.x=n.fx; n.y=n.fy; });
+                                                });
+                                        } catch(e) { console.warn('layout refine error:', e); }
+                                })();
+
+                                // Optional: ELK layered layout for larger graphs
+                                async function layoutWithELKIfBig() {
+                                        try {
+                                                if (!elkPref()) return;
+                                                if (!window.ELK) return;
+                                                const THRESH = 60;
+                                                if (nodes.length < THRESH) return;
+                                                const elk = new ELK();
+                                                const elkGraph = {
+                                                        id: 'root',
+                                                        layoutOptions: { 'elk.algorithm': 'layered', 'elk.direction': 'RIGHT' },
+                                                        children: nodes.map(n => ({ id:n.id, width: 90, height: 40 })),
+                                                        edges: links.map(e => ({ id:e.id, sources:[e.source.id || e.source], targets:[e.target.id || e.target] }))
+                                                };
+                                                const res = await elk.layout(elkGraph);
+                                                const pos = new Map();
+                                                (res.children||[]).forEach(c => pos.set(c.id, {x:c.x, y:c.y}));
+                                                nodes.forEach(n => { const p = pos.get(n.id); if (p){ n.fx=p.x; n.fy=p.y; n.x=n.fx; n.y=n.fy; } });
+                                        } catch (e) { console.warn('ELK layout failed:', e); }
+                                }
+                                // Separate overlapping edges (send/recv/create between same endpoints) into lanes.
+                                (function assignLanes() {
+                                        const allEdges = links.concat(createLinks);
+                                        const byPair = new Map();
+                                        const idOf = (x) => typeof x === 'string' ? x : x.id;
+                                        for (const e of allEdges) {
+                                                const key = `${idOf(e.source)}::${idOf(e.target)}`;
+                                                if (!byPair.has(key)) byPair.set(key, []);
+                                                byPair.get(key).push(e);
+                                        }
+                                        byPair.forEach((arr) => {
+                                                if (arr.length <= 1) return;
+                                                // Distribute symmetrically around the center line.
+                                                arr.forEach((e, i) => {
+                                                        const n = arr.length;
+                                                        // lane index in [-k...k]
+                                                        const lane = i - (n - 1) / 2;
+                                                        e.curve = (e.curve || 0) + lane * 18; // 18px offset per lane
+                                                });
+                                        });
+                                })();
+                                // Compute per-channel send→recv delta and pair index.
+                                const perChan = new Map();
+                                const extractChannelKey = (node) => (typeof node === 'string' && node.startsWith('ch:')) ? node.slice(3) : '';
+                                for (const l of links) {
+                                        const ch = l.meta.channel || extractChannelKey(l.source) || extractChannelKey(l.target) || '';
+                                        if (!perChan.has(ch)) perChan.set(ch, { pending: null, pair: 0 });
+                                        const st = perChan.get(ch);
+                                        if (l.kind === 'send') {
+                                                st.pending = l;
+                                        } else if (l.kind === 'recv' && st.pending) {
+                                                st.pair += 1;
+                                                const send = st.pending;
+                                                l.meta.chan_delta = l.meta.time_ms - send.meta.time_ms;
+                                                l.meta.chan_pair = st.pair;
+                                                send.meta.chan_pair = st.pair;
+                                                st.pending = null;
+                                        }
+                                }
+
+                                /*** ==== D3 rendering ==== ***/
+                                const width = window.innerWidth, height = window.innerHeight;
+                                const svg = d3.select('#graph').append('svg')
+                                        .attr('width', width)
+                                        .attr('height', height);
+
+                                const root = svg.append('g');
+
+                                const zoom = d3.zoom()
+                                        .scaleExtent([0.25, 4])
+                                        .on('zoom', (ev) => { root.attr('transform', ev.transform); try { renderLabels(ev.transform.k); } catch {} });
+                                svg.call(zoom).on('dblclick.zoom', null).on('click', () => clearSelection());
+
+                                const defs = svg.append('defs');
+                                defs.append('marker').attr('id', 'arrow-send').attr('viewBox', '0 -5 10 10').attr('refX', 10).attr('refY', 0)
+                                        .attr('markerWidth', 6).attr('markerHeight', 6).attr('orient', 'auto')
+                                        .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', 'var(--edge-send)');
+                                defs.append('marker').attr('id', 'arrow-recv').attr('viewBox', '0 -5 10 10').attr('refX', 10).attr('refY', 0)
+                                        .attr('markerWidth', 6).attr('markerHeight', 6).attr('orient', 'auto')
+                                        .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', 'var(--edge-recv)');
+                                defs.append('marker').attr('id', 'arrow-black').attr('viewBox', '0 -5 10 10').attr('refX', 10).attr('refY', 0)
+                                        .attr('markerWidth', 6).attr('markerHeight', 6).attr('orient', 'auto')
+                                        .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#222');
+
+                                const g = root; // preserve variable name used below
+                                const grid = g.append('g').attr('class', 'grid');
+                                for (let x = 0; x < width; x += 40) grid.append('line').attr('x1', x).attr('y1', 0).attr('x2', x).attr('y2', height);
+                                for (let y = 0; y < height; y += 40) grid.append('line').attr('x1', 0).attr('y1', y).attr('x2', width).attr('y2', y);
+
+                                // Predeclare to avoid TDZ across browsers when functions capture these.
+                                let link, create, annLink, linkLabel, node;
+
+                                const linkG = g.append('g').attr('stroke-linecap', 'round');
+                                const causalG = g.append('g').attr('id','causal');
+                                const bundleG = g.append('g').attr('id','bundles');
+                                const pairLayer = g.append('g').attr('id','pair-edges');
+                                link = linkG.selectAll('.edge').data(links, d => d.id).join('path')
+                                        .attr('class', d => `edge ${d.kind}${d.tentative?' tentative':''}${d.commit?' commit':''}${d.dropped?' dropped':''}${d.meta && d.meta.src === 'synth' ? ' synth' : ''}`)
+                                        .attr('marker-end', d => {
+                                                const styleIsMin = (loadStyle()==='minimal');
+                                                if (styleIsMin) return 'url(#arrow-black)';
+                                                return (d.kind === 'send') ? 'url(#arrow-send)' : (d.kind === 'recv' ? 'url(#arrow-recv)' : null);
+                                        });
+
+                                // Create links (no arrowheads, light dashed stroke)
+                                const createG = g.append('g').attr('stroke-linecap', 'round').attr('id','create-links');
+                                create = createG.selectAll('.edge.create').data(createLinks, d => d.id).join('path')
+                                        .attr('class', 'edge create');
+
+                                const fmtDelta = (ms) => {
+                                        if (ms == null) return '';
+                                        const a = Math.abs(ms);
+                                        if (a < 1e-3) return `${(ms*1e6).toFixed(0)}ns`;
+                                        if (a < 1) return `${(ms*1e3).toFixed(0)}µs`;
+                                        return `${ms.toFixed(3)}ms`;
+                                };
+                                let showIDs = loadIDsPref();
+                                function computeEdgeLabel(d){
+                                        const val = d.meta.value !== undefined ? ` = ${d.meta.value}` : '';
+                                        const dprev = d.meta.delta != null ? `  Δprev=${fmtDelta(d.meta.delta)}` : '';
+                                        const dch = d.meta.chan_delta != null ? `  Δch=${fmtDelta(d.meta.chan_delta)}` : '';
+                                        const pair = d.meta.chan_pair != null ? ` (pair ${d.meta.chan_pair})` : '';
+                                        const ids = showIDs && (d.meta.attempt_id||d.meta.commit_id) ? ` id:${d.meta.attempt_id||''}${d.meta.commit_id?`→${d.meta.commit_id}`:''}` : '';
+                                        const sid = showIDs && d.meta && d.meta.attempt_id && attemptToSelect.get(d.meta.attempt_id) ? ` sid:${attemptToSelect.get(d.meta.attempt_id)}` : '';
+                                        const pairIdTxt = showIDs && d.meta && d.meta.pair_id ? ` p:${d.meta.pair_id}` : '';
+                                        const delt = (d.meta.delta_ms!=null) ? ` Δ=${fmtDelta(d.meta.delta_ms)}` : '';
+                                        const drop = (d.dropped ? ' dropped' : '');
+                                        return `#${d.meta.seq} ${d.meta.event}${val}${pair}${ids}${sid}${pairIdTxt}${delt}${drop}${dprev}${dch}  t=${d.meta.time_ms}ms`;
+                                }
+                                linkLabel = linkG.selectAll('.edge-label').data(links, d => d.id).join('text')
+                                        .attr('class', d => `edge-label${d.meta && d.meta.src === 'synth' ? ' synth' : ''}`)
+                                        .attr('text-anchor', 'middle')
+                                        .text(computeEdgeLabel);
+
+                                // Bundling overlay — initialize; actual data computed after nodes/idMap exist
+                                function groupKeyOfNode(n){
+                                        const parts = String(n.func||'').split('.');
+                                        if (parts.length >= 2) return parts.slice(-2).join('.');
+                                        if (parts.length === 1 && parts[0]) return parts[0];
+                                        return String(n.role||'worker');
+                                }
+                                function buildBundles(){
+                                        const groupMembers = new Map();
+                                        nodes.forEach(n => { if (n.type==='goroutine') { const key = groupKeyOfNode(n); if (!groupMembers.has(key)) groupMembers.set(key, []); groupMembers.get(key).push(n); } });
+                                        const map = new Map();
+                                        function add(kind, group, chId){ const k = kind+'|'+group+'|'+chId; let r = map.get(k); if(!r){ r={kind, group, chId, count:0}; map.set(k,r); } r.count++; }
+                                        links.forEach(l => {
+                                                if (l.kind !== 'send' && l.kind !== 'recv') return;
+                                                const s = (typeof l.source === 'string') ? idMap[l.source] : l.source;
+                                                const t = (typeof l.target === 'string') ? idMap[l.target] : l.target;
+                                                if (l.kind === 'send') {
+                                                        if (!s || s.type!=='goroutine' || !t || t.type!=='channel') return;
+                                                        add('send', groupKeyOfNode(s), t.id);
+                                                } else {
+                                                        if (!t || t.type!=='goroutine' || !s || s.type!=='channel') return;
+                                                        add('recv', groupKeyOfNode(t), s.id);
+                                                }
+                                        });
+                                        return { groupMembers, bundles: Array.from(map.values()) };
+                                }
+                                function anchorForGroup(key){
+                                        // idMap and nodes are available after init below
+                                        const mem = nodes.filter(n => n.type==='goroutine' && groupKeyOfNode(n)===key);
+                                        if (mem.length) {
+                                                let sx=0, sy=0; mem.forEach(n => { sx+=n.x||0; sy+=n.y||0; }); return { x: sx/mem.length, y: sy/mem.length };
+                                        }
+                                        const cid = safeId(key); const c = idMap[cid]; if (c) return { x:c.x, y:c.y };
+                                        return { x: width/2, y: height/2 };
+                                }
+                                let bundleSel = bundleG.selectAll('.edge.bundle').data([]).join('path').attr('class','edge bundle');
+                                let bundleLbl = bundleG.selectAll('text.bundle').data([]).join('text').attr('class','edge-label bundle').attr('text-anchor','middle');
+
+                                // Optional: causal overlay edges between sender_g ⇒ receiver_g (from recv commits)
+                                const causals = [];
+                                try {
+                                        const showCausal = (function(){ const el=document.getElementById('toggleCausal'); return el && el.checked; })();
+                                        if (showCausal) {
+                                                for (const e of trace) {
+                                                        if (!e || e.event !== 'chan_recv_commit') continue;
+                                                        if (!e.peer_g) continue;
+                                                        causals.push({ id: `causal:${e.peer_g}->${e.g}#${e.time_ms}`, s: `g${e.peer_g}`, t: `g${e.g}`, ch: (e.channel || ''), msg_id: (e.msg_id||null) });
+                                                }
+                                        }
+                                } catch {}
+                                const causalSel = causalG.selectAll('path.edge.causal').data(causals, d => d.id).join('path').attr('class','edge causal');
+                                const causalLbl = causalG.selectAll('text.causal').data(causals, d => d.id).join('text').attr('class','edge-label causal').attr('text-anchor','middle').text(d => (d.ch?`${d.ch}`:'') + (d.msg_id?` #${d.msg_id}`:''));
+
+                                // Annotation links (dotted, no arrow)
+                                const annLinkG = g.append('g').attr('id','ann-links');
+                                annLink = annLinkG.selectAll('.edge.ann').data(annLinks, d => d.id).join('path')
+                                        .attr('class', 'edge ann');
+                                // Notes OFF by default and badge showing how many are hidden
+                                try {
+                                        const notesToggle = document.getElementById('toggleNotes');
+                                        if (notesToggle) {
+                                                notesToggle.checked = false;
+                                                const badge = document.getElementById('notesCount');
+                                                if (badge) badge.textContent = annLinks.length ? `hidden: ${annLinks.length}` : '';
+                                                d3.select('#ann-links').attr('display', 'none');
+                                        }
+                                } catch {}
+
+                        // Pin positions assigned by layered layout; distribute notes around center
+                                (function pinLayout() {
+                                        const cx = width/2, cy = height/2;
+                                        const leftMost = Math.min(...nodes.filter(n=>isFinite(n.x)).map(n=>n.x));
+                                        const rightMost = Math.max(...nodes.filter(n=>isFinite(n.x)).map(n=>n.x));
+                                        nodes.forEach(n => { if (isFinite(n.x) && isFinite(n.y)) { n.fx = n.x; n.fy = n.y; } });
+                                        const notes = nodes.filter(n => n.type === 'note').sort((a,b) => (a.time_ms??0) - (b.time_ms??0));
+                                        const spacing = 52;
+                                        const half = Math.ceil(notes.length / 2);
+                                        for (let i = 0; i < notes.length; i++) {
+                                                const n = notes[i];
+                                                const sideLeft = i < half;
+                                                const baseX = sideLeft ? (leftMost - 180) : (rightMost + 180);
+                                                const k = sideLeft ? i : (i - half);
+                                                const y = cy - (spacing * (half - 1)) / 2 + k * spacing;
+                                                n.fx = baseX; n.fy = y; n.x=n.fx; n.y=n.fy;
+                                        }
+                                })();
+
+                                nodes.forEach(n => {
+                                        if (n.type !== 'note' && Number.isFinite(n.fx) && Number.isFinite(n.fy)) {
+                                                n.homeX = n.fx;
+                                                n.homeY = n.fy;
+                                                n.x = n.homeX;
+                                                n.y = n.homeY;
+                                                delete n.fx;
+                                                delete n.fy;
+                                        } else {
+                                                n.homeX = n.homeX ?? n.x;
+                                                n.homeY = n.homeY ?? n.y;
+                                        }
+                                });
+
+                                // Force simulation (defined before nodes so we can pass it to drag())
+                                const laneX = d => {
+                                        if (d.type === 'channel') return width * 0.54;
+                                        if (d.type === 'goroutine') {
+                                                const role = (d.role || '').toLowerCase();
+                                                if (role === 'main' || role.startsWith('main')) return width * 0.22;
+                                        }
+                                        return width * 0.83;
+                                };
+                                const laneY = d => d.homeY ?? (height * 0.55);
+                                const sim = d3.forceSimulation(nodes)
+                                        .force('charge', d3.forceManyBody().strength(-320))
+                                        .force('link', d3.forceLink(links).id(d => d.id).distance(d => (d.source.type === 'channel' || d.target.type === 'channel') ? 120 : 160).strength(0.1))
+                                        .force('center', d3.forceCenter(width / 2, height / 2))
+                                        .force('collide', d3.forceCollide().radius(d => d.type === 'goroutine' ? 26 : 20).iterations(2))
+                                        .force('x', d3.forceX(laneX).strength(0.08))
+                                        .force('y', d3.forceY(laneY).strength(0.04));
+
+                                const nodeG = g.append('g');
+                                node = nodeG.selectAll('.node').data(nodes, d => d.id).join(enter => {
+                                        const ng = enter.append('g').attr('class', 'node').call(drag(sim));
+                                        ng.each(function (d) {
+                                                const el = d3.select(this);
+                                                const styleMin = (function(){ try { return (localStorage.getItem('gtv.style')||'default')==='minimal'; } catch { return false } })();
+                                                if (d.type === 'goroutine') {
+                                                        el.classed('goroutine', true);
+                                                        el.classed((d.role||'').toLowerCase(), true);
+                                                        el.append('circle').attr('r', 18)
+                                                                .attr('fill', styleMin ? (((d.role||'').toLowerCase()==='main') ? '#60a5fa' : '#f87171') : (d.role === 'main' ? 'var(--main)' : 'var(--worker)'));
+                                                        el.append('text').attr('dy', 4).attr('text-anchor', 'middle').text(d.shortLabel);
+                                                } else if (d.type === 'channel') {
+                                                        el.classed('channel', true);
+                                                        if (styleMin) {
+                                                                el.append('circle').attr('r', 14).attr('fill', '#34d399');
+                                                        } else {
+                                                                el.append('rect').attr('width', 60).attr('height', 18).attr('x', -30).attr('y', -9);
+                                                        }
+                                                        el.append('text').attr('dy', 4).attr('text-anchor', 'middle').text(d.shortLabel);
+                                                        // Queue indicator below channel node (static snapshot)
+                                                        if (d.cap > 0) {
+                                                                const qg = el.append('g').attr('transform', 'translate(0,18)');
+                                                                const maxDiscrete = 12;
+                                                                if (d.cap <= maxDiscrete) {
+                                                                        const size = 6, gap = 2;
+                                                                        const totalW = d.cap*size + (d.cap-1)*gap;
+                                                                        let x0 = -totalW/2 + size/2;
+                                                                        for (let i=0;i<d.cap;i++){
+                                                                                qg.append('circle').attr('cx', x0).attr('cy', 0).attr('r', 3).attr('fill', i < (d.depth||0) ? '#8bc34a' : '#3b476d');
+                                                                                x0 += size+gap;
+                                                                        }
+                                                                } else {
+                                                                        const W = 60, H = 6; const x=-W/2, y=-H/2;
+                                                                        qg.append('rect').attr('x', x).attr('y', y).attr('rx', 2).attr('width', W).attr('height', H).attr('fill', '#3b476d');
+                                                                        const fillW = Math.max(0, Math.min(W, W*((d.depth||0)/d.cap)));
+                                                                        qg.append('rect').attr('x', x).attr('y', y).attr('rx', 2).attr('width', fillW).attr('height', H).attr('fill', '#8bc34a');
+                                                                }
+                                                        }
+                                                } else if (d.type === 'cluster') {
+                                                        el.classed('cluster', true);
+                                                        if (styleMin) {
+                                                                el.append('circle').attr('r', 16).attr('fill', '#a78bfa');
+                                                        } else {
+                                                                el.append('rect').attr('width', 84).attr('height', 22).attr('x', -42).attr('y', -11);
+                                                        }
+                                                        el.append('text').attr('dy', 4).attr('text-anchor', 'middle').text(d.label);
+                                                } else if (d.type === 'note') {
+                                                        el.classed('note', true);
+                                                        el.append('rect').attr('width', 160).attr('height', 44).attr('x', -80).attr('y', -22);
+                                                        const lines = String(d.label).split('\n');
+                                                        const t = el.append('text').attr('text-anchor', 'middle');
+                                                        lines.forEach((ln, i) => t.append('tspan').attr('x', 0).attr('dy', i ? 14 : 4).text(ln));
+                                                }
+                                        });
+                                        return ng;
+                                });
+
+                                // Build id -> node map for quick lookups
+                                const idMap = {}; nodes.forEach(n => idMap[n.id] = n);
+                                // Initialize bundles now that idMap and nodes exist
+                                (function initBundles(){
+                                        try {
+                                                const { bundles } = buildBundles();
+                                                bundleSel = bundleG.selectAll('.edge.bundle').data(bundles, d=>d.kind+':'+d.group+'->'+d.chId).join('path').attr('class','edge bundle');
+                                                bundleLbl = bundleG.selectAll('text.bundle').data(bundles, d=>d.kind+':'+d.group+'->'+d.chId).join('text').attr('class','edge-label bundle').attr('text-anchor','middle').text(d=>String(d.count));
+                                        } catch {}
+                                })();
+
+                                // Selection helpers
+                                let selectedNodeEl = null, selectedEdgeEl = null;
+                                function clearSelection() {
+                                        if (selectedNodeEl) { d3.select(selectedNodeEl).classed('selected', false); selectedNodeEl = null; }
+                                        if (selectedEdgeEl) { d3.select(selectedEdgeEl).classed('selected', false); selectedEdgeEl = null; }
+                                        const hud = document.getElementById('selHUD'); if (hud) { hud.style.display='none'; hud.innerHTML=''; }
+                                }
+
+                                node.each(function (d) {
+                                        const el = d3.select(this);
+                                        if (d.type === 'goroutine' && d.blocked) el.classed('blocked', true);
+                                });
+
+                                const tooltip = document.getElementById('tooltip');
+                                function showTip(html, x, y) { tooltip.style.display = 'block'; tooltip.style.left = (x + 12) + 'px'; tooltip.style.top = (y + 12) + 'px'; tooltip.innerHTML = html; }
+                                function hideTip() { tooltip.style.display = 'none'; }
+
+                                function setSelHUD(html) {
+                                        const hud = document.getElementById('selHUD');
+                                        if (html) { hud.style.display='block'; hud.innerHTML = html; }
+                                        else { hud.style.display='none'; hud.innerHTML=''; }
+                                }
+
+                                node.on('click', (ev) => {
+                                        ev.stopPropagation();
+                                        clearSelection();
+                                        const el = d3.select(ev.currentTarget).classed('selected', true);
+                                        selectedNodeEl = ev.currentTarget;
+                                        const d = el.datum();
+                                        if (d.type === 'cluster') {
+                                                // Toggle expand/collapse state
+                                                try {
+                                                        const raw = localStorage.getItem('gtv.clusters.expanded') || '[]';
+                                                        const arr = JSON.parse(raw);
+                                                        const idx = arr.indexOf(d.id);
+                                                        if (idx >= 0) arr.splice(idx, 1); else arr.push(d.id);
+                                                        localStorage.setItem('gtv.clusters.expanded', JSON.stringify(arr));
+                                                } catch {}
+                                                location.reload();
+                                                return;
+                                        }
+                                        setSelHUD(`<b>Node</b><br>id=${d.id}<br>type=${d.type}${d.role?`<br>role=${d.role}`:''}${d.func?`<br>func=${d.func}`:''}`);
+                                })
+                                     .on('mouseenter', (ev, d) => {
+                                        let text;
+                                        if (d.type === 'cluster') {
+                                                text = `cluster ${d.label}\nmembers=${(d.members||[]).length}`;
+                                        } else if (d.type === 'goroutine') {
+                                                const events = trace.filter(e => e.g !== undefined && `g${e.g}` === d.id);
+                                                text = `goroutine ${d.id}\nrole=${d.role}${d.func ? `\nfunc=${d.func}` : ''}` + '\n\n' + (events.length ? events.map(e => `${e.event}  t=${e.time_ms}ms${e.value !== undefined ? `  v=${e.value}` : ''}`).join('\n') : '—');
+                                        } else if (d.type === 'channel') {
+                                                const cap = (d.cap!=null) ? `\ncap=${d.cap}` : '';
+                                                const typ = d.elem_type ? `\ntype=${d.elem_type}` : '';
+                                                const ptr = d.ptr ? `\nptr=${d.ptr}` : '';
+                                                const depth = (d.cap>0) ? `\ndepth=${d.depth||0}` : '';
+                                                const aliasText = (d.aliases && d.aliases.length) ? `\naliases=${d.aliases.map(a => a.count > 1 ? `${a.label} (${a.count})` : a.label).join(', ')}` : '';
+                                                text = `channel ${d.label}${cap}${typ}${ptr}${depth}${aliasText}`;
+                                        } else {
+                                                text = String(d.label||d.id);
+                                        }
+                                        showTip(String(text).replaceAll('\n', '<br>'), ev.pageX, ev.pageY);
+                                }).on('mouseleave', hideTip);
+
+                                link.on('click', (ev) => {
+                                        ev.stopPropagation();
+                                        clearSelection();
+                                        const el = d3.select(ev.currentTarget).classed('selected', true);
+                                        selectedEdgeEl = ev.currentTarget;
+                                        const d = el.datum();
+                                        const meta = d.meta||{};
+                                        const ids = (meta.attempt_id||meta.commit_id) ? `<br>attempt=${meta.attempt_id||''}${meta.commit_id?` commit=${meta.commit_id}`:''}` : '';
+                                        const peer = (meta.peer_g ? `<br>peer_g=g${meta.peer_g}` : '');
+                                        const sId = (typeof d.source === 'string') ? d.source : (d.source.id || '');
+                                        const tId = (typeof d.target === 'string') ? d.target : (d.target.id || '');
+                                        if (d.kind === 'spawn') {
+                                                setSelHUD(`<b>Edge</b><br>spawn ${sId} → ${tId}<br>t=${meta.time_ms}ms`);
+                                        } else {
+                                                const dropped = d.dropped ? '<br>dropped' : '';
+                                                const sid = (meta.attempt_id && attemptToSelect.get(meta.attempt_id)) ? `<br>sid=${attemptToSelect.get(meta.attempt_id)}` : '';
+                                                const pairId = meta.pair_id ? `<br>pair=${meta.pair_id}` : '';
+                                                const delt = (meta.delta_ms!=null) ? `<br>Δ=${(function(x){ const a=Math.abs(x); if(a<1e-3) return (x*1e6).toFixed(0)+'ns'; if(a<1) return (x*1e3).toFixed(0)+'µs'; return x.toFixed(3)+'ms'; })(meta.delta_ms)}` : '';
+                                                // Compact select summary (if available)
+                                                let selHUD = '';
+                                                try {
+                                                        const sidRaw = (meta.attempt_id && attemptToSelect.get(meta.attempt_id)) ? attemptToSelect.get(meta.attempt_id) : '';
+                                                        if (sidRaw && selectSummary.has(sidRaw)) {
+                                                                const sum = selectSummary.get(sidRaw);
+                                                                const cand = (sum.dropped ? sum.dropped.length : 0) + (sum.chosen ? 1 : 0);
+                                                                const status = (sum.chosen && meta.attempt_id === sum.chosen) ? 'chosen' : (d.dropped ? 'dropped' : 'candidate');
+                                                                selHUD = `<div style="margin-top:6px"><b>select</b> sid=${sidRaw} • status=${status}${sum.chosen?` • chosen=${sum.chosen}`:''} • candidates=${cand}</div>`;
+                                                        }
+                                                } catch {}
+                                                const ptr = meta.ch_ptr ? `<br>ptr=${meta.ch_ptr}` : '';
+                                                setSelHUD(`<b>Edge</b><br>${d.kind} ${meta.event||''}${meta.value!==undefined?` = ${meta.value}`:''}${meta.channel?`<br>ch=${meta.channel}`:''}${ptr}${meta.seq?`<br>#${meta.seq}`:''}${ids}${peer}${sid}${pairId}${delt}${dropped}<br>t=${meta.time_ms}ms${meta.chan_delta!=null?`<br>Δch=${meta.chan_delta}ms`:''}${selHUD}`);
+                                        }
+                                })
+                                    .on('mouseenter', (ev, d) => {
+                                        const fmtDelta = (ms) => {
+                                                if (ms == null) return '';
+                                                const a = Math.abs(ms);
+                                                if (a < 1e-3) return `${(ms*1e6).toFixed(0)}ns`;
+                                                if (a < 1) return `${(ms*1e3).toFixed(0)}µs`;
+                                                return `${ms.toFixed(3)}ms`;
+                                        };
+                                        const dprev = d.meta.delta != null ? `<br>Δprev=${fmtDelta(d.meta.delta)}` : '';
+                                        const dch = d.meta.chan_delta != null ? `<br>Δch=${fmtDelta(d.meta.chan_delta)}` : '';
+                                        const pair = d.meta.chan_pair != null ? `<br>pair=${d.meta.chan_pair}` : '';
+                                        const ids = (d.meta.attempt_id||d.meta.commit_id) ? `<br>id=${d.meta.attempt_id||''}${d.meta.commit_id?`→${d.meta.commit_id}`:''}` : '';
+                                        const peer = (d.meta.peer_g ? `<br>peer_g=g${d.meta.peer_g}` : '');
+                                        const sid = (d.meta.attempt_id && attemptToSelect.get(d.meta.attempt_id)) ? `<br>sid=${attemptToSelect.get(d.meta.attempt_id)}` : '';
+                                        if (d.kind === 'spawn') {
+                                                const sId = (typeof d.source === 'string') ? d.source : (d.source.id || '');
+                                                const tId = (typeof d.target === 'string') ? d.target : (d.target.id || '');
+                                                showTip(`spawn ${sId} → ${tId}<br>t=${d.meta.time_ms}ms`, ev.pageX, ev.pageY);
+                                        } else {
+                                                const ptr = d.meta && d.meta.ch_ptr ? `<br>ptr=${d.meta.ch_ptr}` : '';
+                                                showTip(`#${d.meta.seq} ${d.meta.event}${d.meta.value !== undefined ? `<br>value=${d.meta.value}` : ''}${ids}${peer}${sid}${pair}${ptr}<br>t=${d.meta.time_ms}ms${dprev}${dch}`, ev.pageX, ev.pageY);
+                                        }
+                                }).on('mouseleave', hideTip);
+
+                        // Toolbar wiring
+                        try { document.getElementById('fitBtn').addEventListener('click', fitView); } catch {}
+                        try { document.getElementById('downloadBtn').addEventListener('click', () => downloadPNG('graph.png')); } catch {}
+                        try { document.getElementById('clearLayoutBtn').addEventListener('click', () => { try { localStorage.removeItem('gtv.layout'); } catch {}; location.reload(); }); } catch {}
+                        try {
+                                document.getElementById('styleBtn').addEventListener('click', () => {
+                                        const cur = (function(){ try { return localStorage.getItem('gtv.style')||'default'; } catch { return 'default' } })();
+                                        const next = cur === 'minimal' ? 'default' : 'minimal';
+                                        try { localStorage.setItem('gtv.style', next); } catch {}
+                                        document.body.classList.toggle('style-min', next === 'minimal');
+                                        d3.selectAll('.edge').attr('marker-end', d => (next==='minimal' ? 'url(#arrow-black)' : (d.kind === 'send' ? 'url(#arrow-send)' : 'url(#arrow-recv)')));
+                                });
+                        } catch {}
+                        // Messages only toggle (hide goroutine↔channel edges, show only causal)
+                        try {
+                                const mo = document.getElementById('toggleMsgOnly');
+                                if (mo) {
+                                        mo.addEventListener('change', (e) => {
+                                                const on = !!e.target.checked;
+                                                link.attr('display', on ? 'none' : null);
+                                                linkLabel.attr('display', on ? 'none' : null);
+                                                d3.select('#create-links').attr('display', on ? 'none' : null);
+                                                d3.select('#ann-links').attr('display', on ? 'none' : null);
+                                        });
+                                }
+                        } catch {}
+                        // Split P2P toggle (reload to apply)
+                        try {
+                                const sp = document.getElementById('toggleSplit');
+                                if (sp) {
+                                        sp.checked = (function(){ try { return localStorage.getItem('gtv.split') === '1'; } catch { return false } })();
+                                        sp.addEventListener('change', (e) => { try { localStorage.setItem('gtv.split', e.target.checked ? '1':'0'); } catch{}; location.reload(); });
+                                }
+                        } catch {}
+                        // Bundle toggle
+                        try {
+                                const b = document.getElementById('toggleBundle');
+                                if (b) {
+                                        b.addEventListener('change', (e) => {
+                                                d3.select('#bundles').attr('display', e.target.checked ? null : 'none');
+                                        });
+                                }
+                        } catch {}
+                        // Clusters toggle: persist and reload to rebuild nodes/links
+                        try {
+                                const cl = document.getElementById('toggleClusters');
+                                if (cl) {
+                                        // Initialize checkbox to reflect computed state
+                                        cl.checked = clustersOn;
+                                        cl.addEventListener('change', (e) => {
+                                                try { setClustersPref(!!e.target.checked); } catch {}
+                                                location.reload();
+                                        });
+                                }
+                        } catch {}
+                                annLink.on('mouseenter', (ev, d) => { showTip(`t=${d.meta.time_ms}ms`, ev.pageX, ev.pageY); }).on('mouseleave', hideTip);
+                                create.on('mouseenter', (ev, d) => { showTip(`create ${d.meta.channel}<br>t=${d.meta.time_ms}ms`, ev.pageX, ev.pageY); }).on('mouseleave', hideTip);
+
+                                // IDs toggle wiring
+                                try {
+                                        const idsBox = document.getElementById('toggleIDs');
+                                        if (idsBox) {
+                                                idsBox.checked = showIDs;
+                                                idsBox.addEventListener('change', (e) => {
+                                                        showIDs = !!e.target.checked; saveIDsPref(showIDs);
+                                                        linkLabel.text(computeEdgeLabel);
+                                                });
+                                        }
+                                } catch {}
+
+                        let pinOnDrop = false;
+                        // Zoom-level label LOD (hide labels when zoomed out)
+                        function renderLabels(k){
+                                const edgeLabelsOn = (k>=0.8);
+                                const mini = (k>=0.6 && k<0.8);
+                                d3.select('body').classed('hide-edge-labels', !(edgeLabelsOn || mini));
+                                // LOD bundling: auto-show bundles when zoomed out sufficiently unless user enabled/disabled explicitly
+                                try {
+                                        const on = (function(){ const el=document.getElementById('toggleBundle'); return el && el.checked; })();
+                                        const auto = (!on && k <= 0.65);
+                                        d3.select('#bundles').attr('display', (on || auto) ? null : 'none');
+                                } catch {}
+                        }
+                        function drag(sim) {
+                                function dragstarted(event) {
+                                        if (!staticLayout && !event.active) sim.alphaTarget(0.3).restart();
+                                        // Ensure node is movable immediately.
+                                        event.subject.fx = event.subject.x;
+                                        event.subject.fy = event.subject.y;
+                                }
+                                function dragged(event) {
+                                        // Follow the pointer while dragging.
+                                        event.subject.fx = event.x;
+                                        event.subject.fy = event.y;
+                                        if (staticLayout) { event.subject.x = event.x; event.subject.y = event.y; redraw(); }
+                                }
+                                function dragended(event) {
+                                        // On drop, either keep pinned or release to physics.
+                                        if (!staticLayout) {
+                                                if (!event.active) sim.alphaTarget(0);
+                                                if (pinOnDrop) { event.subject.fx = event.x; event.subject.fy = event.y; }
+                                                else { event.subject.fx = null; event.subject.fy = null; }
+                                        } else {
+                                                // keep position where dropped
+                                                event.subject.fx = event.x; event.subject.fy = event.y; event.subject.x = event.x; event.subject.y = event.y; redraw();
+                                        }
+                                        // Persist layout
+                                        try { saveLayout(); } catch {}
+                                }
+                                return d3.drag().on('start', dragstarted).on('drag', dragged).on('end', dragended);
+                        }
+
+                        // Allow double‑click to unpin a node so the force layout
+                        // can reposition it again if desired.
+                        d3.select('body').on('dblclick.node', null); // ensure no propagation conflicts
+                        // Hook up UI for pin toggle and fit button
+                        d3.select('#pinToggle').on('change', (ev) => { pinOnDrop = ev.target.checked; });
+
+                                let raf = 0, needsDraw = false;
+                                function scheduleDraw(){ needsDraw = true; if (!raf) raf = requestAnimationFrame(()=>{ raf=0; if (needsDraw){ needsDraw=false; redraw(); } }); }
+
+                                function redraw() {
+                                        link.attr('d', d => {
+                                                const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
+                                                if (d.curve) {
+                                                        const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+                                                        const nx = ty - sy, ny = -(tx - sx);
+                                                        const nlen = Math.hypot(nx, ny) || 1;
+                                                        const k = d.curve / nlen;
+                                                        const cx = mx + nx * k, cy = my + ny * k;
+                                                        return `M${sx},${sy} Q${cx},${cy} ${tx},${ty}`;
+                                                } else {
+                                                        return `M${sx},${sy} L${tx},${ty}`;
+                                                }
+                                        }).attr('marker-end', d => {
+                                                const isMin = (function(){ try { return localStorage.getItem('gtv.style')==='minimal'; } catch { return false } })();
+                                                if (isMin) return 'url(#arrow-black)';
+                                                return (d.kind === 'send') ? 'url(#arrow-send)' : (d.kind === 'recv' ? 'url(#arrow-recv)' : null);
+                                        });
+
+                                        annLink.attr('d', d => `M${d.source.x},${d.source.y} L${d.target.x},${d.target.y}`);
+                                        create.attr('d', d => {
+                                                const s = nodes.find(n => n.id === d.source.id) || d.source;
+                                                const t = nodes.find(n => n.id === d.target.id) || d.target;
+                                                if (!s.x || !t.x) return '';
+                                                return `M${s.x},${s.y} L${t.x},${t.y}`;
+                                        });
+
+                                        linkLabel.attr('x', d => (d.source.x + d.target.x) / 2).attr('y', d => (d.source.y + d.target.y) / 2 - (d.curve ? 10 : 0));
+                                        node.attr('transform', d => `translate(${d.x},${d.y})`);
+                                        // Update bundle overlay geometry
+                                        try {
+                                                bundleSel.attr('d', d => {
+                                                        const a = anchorForGroup(d.group);
+                                                        const c = idMap[d.chId]; if (!c) return '';
+                                                        const sx = (d.kind==='send') ? a.x : c.x;
+                                                        const sy = (d.kind==='send') ? a.y : c.y;
+                                                        const tx = (d.kind==='send') ? c.x : a.x;
+                                                        const ty = (d.kind==='send') ? c.y : a.y;
+                                                        const mx=(sx+tx)/2, my=(sy+ty)/2, nx=ty-sy, ny=-(tx-sx), nlen=Math.hypot(nx,ny)||1, k=22/nlen, cx=mx+nx*k, cy=my+ny*k;
+                                                        return `M${sx},${sy} Q${cx},${cy} ${tx},${ty}`;
+                                                });
+                                                bundleLbl.attr('x', d => { const a=anchorForGroup(d.group), c=idMap[d.chId]; return (a.x + (c?c.x:0))/2; })
+                                                         .attr('y', d => { const a=anchorForGroup(d.group), c=idMap[d.chId]; return (a.y + (c?c.y:0))/2 - 10; });
+                                        } catch {}
+                                        // Update causal overlay geometry
+                                        try {
+                                                causalSel.attr('d', d => {
+                                                        const s = idMap[d.s] || nodes.find(n => n.id === d.s);
+                                                        const t = idMap[d.t] || nodes.find(n => n.id === d.t);
+                                                        if (!s || !t) return '';
+                                                        const sx=s.x, sy=s.y, tx=t.x, ty=t.y;
+                                                        const mx=(sx+tx)/2, my=(sy+ty)/2, nx=ty-sy, ny=-(tx-sx), nlen=Math.hypot(nx,ny)||1, k=18/nlen, cx=mx+nx*k, cy=my+ny*k;
+                                                        return `M${sx},${sy} Q${cx},${cy} ${tx},${ty}`;
+                                                });
+                                                causalLbl.attr('x', d => { const s=idMap[d.s]||nodes.find(n=>n.id===d.s), t=idMap[d.t]||nodes.find(n=>n.id===d.t); if(!s||!t) return 0; return (s.x + t.x)/2; })
+                                                         .attr('y', d => { const s=idMap[d.s]||nodes.find(n=>n.id===d.s), t=idMap[d.t]||nodes.find(n=>n.id===d.t); if(!s||!t) return 0; return (s.y + t.y)/2 - 10; });
+                                        } catch {}
+                                }
+
+                                if (!staticLayout) {
+                                        sim.on('tick', scheduleDraw);
+                                } else {
+                                        // Initialize positions from pinned (fx,fy) or current values and draw once
+                                        nodes.forEach(n => { if (Number.isFinite(n.fx) && Number.isFinite(n.fy)) { n.x = n.fx; n.y = n.fy; } });
+                                        scheduleDraw();
+                                }
+
+                                // After initial draw, attempt ELK layout (if enabled/available) and redraw
+                                layoutWithELKIfBig().then(() => scheduleDraw());
+
+                                // Main↔Channel filter toggle
+                                function isMainChanEdge(d){
+                                        const s = (typeof d.source === 'string') ? idMap[d.source] : d.source;
+                                        const t = (typeof d.target === 'string') ? idMap[d.target] : d.target;
+                                        const sm = (s && s.type==='goroutine' && (s.role||'').toLowerCase()==='main');
+                                        const tm = (t && t.type==='goroutine' && (t.role||'').toLowerCase()==='main');
+                                        const sc = (s && s.type==='channel');
+                                        const tc = (t && t.type==='channel');
+                                        return (sm && tc) || (tm && sc);
+                                }
+                                function applyMainChanFilter(on){
+                                        link.attr('display', d => on && !isMainChanEdge(d) ? 'none' : null);
+                                        linkLabel.attr('display', d => on && !isMainChanEdge(d) ? 'none' : null);
+                                        // Hide create and annotation edges when filtering
+                                        d3.select('#create-links').attr('display', on ? 'none' : null);
+                                        if (document.getElementById('toggleNotes') && !document.getElementById('toggleNotes').checked) {
+                                                d3.select('#ann-links').attr('display', 'none');
+                                        }
+                                }
+                                try { const mc = document.getElementById('toggleMainChan'); if (mc) mc.addEventListener('change', (e)=> applyMainChanFilter(e.target.checked)); } catch {}
+
+                                // Auto-fit once after stabilization
+                                let fitted = false;
+                                if (!staticLayout) sim.on('end', () => { if (!fitted) { fitted = true; fitView(); } });
+                                else { if (!fitted) { fitted = true; fitView(); } }
+
+                                // Fit function available in console
+                                window.fitView = fitView;
+
+                                function fitView() {
+                                        const vb = svg.node().getBoundingClientRect();
+                                        const vw = vb.width, vh = vb.height;
+                                        if (!nodes.length) return;
+                                        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                                        nodes.forEach(n => { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x); maxY = Math.max(maxY, n.y); });
+                                        const pad = 60;
+                                        const w = Math.max(1, maxX - minX + pad * 2), h = Math.max(1, maxY - minY + pad * 2);
+                                        const s = Math.min(vw / w, vh / h);
+                                        const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+                                        const t = d3.zoomIdentity.translate(vw / 2, vh / 2).scale(s).translate(-cx, -cy);
+                                        svg.transition().duration(300).call(zoom.transform, t);
+                                }
+
+                                d3.select('#fitBtn').on('click', fitView);
+                                d3.select('#clearLayoutBtn').on('click', () => { try { localStorage.removeItem('gtv.layout'); } catch {}; location.reload(); });
+                                d3.select('#styleBtn').on('click', () => {
+                                        const cur = (function(){ try { return localStorage.getItem('gtv.style')||'default'; } catch { return 'default' } })();
+                                        const next = cur === 'minimal' ? 'default' : 'minimal';
+                                        try { localStorage.setItem('gtv.style', next); } catch {}
+                                        // Apply CSS class and update arrowheads
+                                        document.body.classList.toggle('style-min', next === 'minimal');
+                                        d3.selectAll('.edge').attr('marker-end', d => (next==='minimal' ? 'url(#arrow-black)' : (d.kind === 'send' ? 'url(#arrow-send)' : 'url(#arrow-recv)')));
+                                });
+                                // Layout persistence
+                                function loadLayout() { try { return JSON.parse(localStorage.getItem('gtv.layout')||'{}'); } catch { return {}; } }
+                                function saveLayout() {
+                                        const m = {};
+                                        nodes.forEach(n => { if (isFinite(n.x) && isFinite(n.y)) m[n.id] = {x:n.x, y:n.y}; });
+                                        try { localStorage.setItem('gtv.layout', JSON.stringify(m)); } catch {}
+                                }
+                                // Save on simulation end and after node drag
+                                sim.on('end.save', saveLayout);
+                                d3.select('#toggleCreate').on('change', (ev) => {
+                                        d3.select('#create-links').attr('display', ev.target.checked ? null : 'none');
+                                });
+                                d3.select('#toggleNotes').on('change', (ev) => {
+                                        d3.select('#ann-links').attr('display', ev.target.checked ? null : 'none');
+                                });
+                        }
+
+                        function enableLocalLoader() {
+                                const overlay = document.getElementById('dropzone');
+                                overlay.style.display = 'flex';
+                                const input = document.getElementById('fileInput');
+                                input.addEventListener('change', () => { if (input.files && input.files[0]) readFile(input.files[0]); });
+                                overlay.addEventListener('dragover', (e) => { e.preventDefault(); overlay.classList.add('drag'); });
+                                overlay.addEventListener('dragleave', () => overlay.classList.remove('drag'));
+                                overlay.addEventListener('drop', (e) => { e.preventDefault(); overlay.classList.remove('drag'); const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) readFile(f); });
+                                function readFile(file) {
+                                        const reader = new FileReader();
+                                        reader.onload = () => {
+                                                let data;
+                                                try { data = JSON.parse(String(reader.result)); }
+                                                catch (e) { alert('Invalid JSON: ' + e.message); return; }
+                                                try {
+                                                        const arr = Array.isArray(data) ? data : (data.events || []);
+                                                        updateOptsHUDFromTrace(arr);
+                                                        overlay.remove(); d3.select('#graph').selectAll('*').remove(); render(arr); setupBottomLoader();
+                                                }
+                                                catch (e) { console.error(e); alert('Render error: ' + e.message); }
+                                        };
+                                        reader.readAsText(file);
+                                }
+                        }
+
+                        function setupBottomLoader() {
+                                const picker = document.getElementById('filePicker');
+                                if (!picker) return;
+                                picker.addEventListener('change', () => {
+                                        const f = picker.files && picker.files[0]; if (!f) return;
+                                        const reader = new FileReader();
+                                        reader.onload = () => {
+                                                let data;
+                                                try { data = JSON.parse(String(reader.result)); }
+                                                catch (e) { alert('Invalid JSON: ' + e.message); return; }
+                                                try {
+                                                        const arr = Array.isArray(data) ? data : (data.events || []);
+                                                        updateOptsHUDFromTrace(arr);
+                                                        d3.select('#graph').selectAll('*').remove(); render(arr);
+                                                }
+                                                catch (e) { console.error(e); alert('Render error: ' + e.message); }
+                                        };
+                                        reader.readAsText(f);
+                                });
+                        }
+                })();
+        </script>
+</body>
+
+</html>
+<!-- moved to web/graph.html -->
