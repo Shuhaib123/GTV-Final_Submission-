@@ -64,7 +64,7 @@ Port: edit `cmd/gtv-live/main.go` (ListenAndServe) to change `:8080`.
 
 1. Run the offline demo to generate trace + JSON:
    - `go run .`
-   - Outputs: `trace.out`, `trace.json`, and `trace.logs.json`.
+   - Outputs: `trace.out` and `trace.json`.
 2. Open the offline visualizer:
    - Option A (via server): `http://localhost:8080/graph.html` and use “Load JSON”.
    - Option B (file): open `web/graph.html` in your browser and load the generated `trace.json`.
@@ -103,6 +103,9 @@ To see values on graph edges without hand-written comments/logs, use one of thes
 - Generated workloads (instrumented path)
   - Optionally pre-annotate source automatically: `go run ./cmd/gtv-autotag -in your_main.go` or `-dir ./path`.
   - Then instrument (via the UI or `gtv-instrument`). The instrumenter and parser attach values to send/recv edges.
+  - Live and offline viewers now derive the channel topology edges from `chan_send`/`chan_recv` events flagged `source:paired`; the legacy `chan_*` attempts/commits are retained only for diagnostics overlays.
+  - The instrumentation level now defaults to `regions` (no per-iteration logs) to keep traces small; pick `regions_logs` explicitly via the UI Level menu or `-level=regions_logs` if you need the extra `trace.Log` annotations.
+  - Value logging is disabled by default — enable it per-workload with the UI’s “Value logs” checkbox, the `value_logs` field (or `-value-logs`) when instrumenting, or globally with `GTV_LOG_VALUES=1`.
 
 - Built-in workloads (not re-instrumented)
   - Use helpers in `internal/workload/traceutil.go`:
@@ -122,6 +125,7 @@ Notes
   { "io_regions": true, "io": { "encoding_json": true, "database_sql": true } }
   ```
   Region labels: `json.marshal`, `json.unmarshal`, `db.query`, `db.exec`.
+- Sample workloads (broadcast, ping-pong, skipgraph, etc.) are bounded as well; you can enforce a wall-clock or step cap with `GTV_MAX_MS` / `GTV_MAX_STEPS` to stop runs that otherwise take too long.
 
 
 - Uses `golang.org/x/exp/trace` for decoding runtime trace streams.

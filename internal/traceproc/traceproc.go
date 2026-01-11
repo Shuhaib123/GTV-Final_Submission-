@@ -2,11 +2,25 @@ package traceproc
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
 	xtrace "golang.org/x/exp/trace"
 )
+
+var skipPairingChannels map[string]bool
+
+func init() {
+	if skip := strings.TrimSpace(os.Getenv("GTV_SKIP_PAIRING_CHANNELS")); skip != "" {
+		skipPairingChannels = make(map[string]bool)
+		for _, part := range strings.Split(skip, ",") {
+			if p := strings.TrimSpace(strings.ToLower(part)); p != "" {
+				skipPairingChannels[p] = true
+			}
+		}
+	}
+}
 
 // TimelineEvent is the canonical event shape used by visualizers.
 type TimelineEvent struct {
@@ -107,11 +121,14 @@ type ParseState struct {
 
 	// Channel identity + buffering
 	// Channel identity by pointer (if instrumented via logs); keyed by logical channel key
-	lastChPtrByG    map[int64]string
-	lastChPtrSeqByG map[int64]int64
-	eventIndexByG   map[int64]int64
-	capByPtr        map[string]int // channel capacity by pointer
-	depthByPtr      map[string]int // buffered depth by pointer (0..cap)
+	lastChPtrByG     map[int64]string
+	lastChPtrSeqByG  map[int64]int64
+	lastChNameByG    map[int64]string
+	lastChNameSeqByG map[int64]int64
+	channelNameByPtr map[string]string
+	eventIndexByG    map[int64]int64
+	capByPtr         map[string]int // channel capacity by pointer
+	depthByPtr       map[string]int // buffered depth by pointer (0..cap)
 	// Set of buffered sends: ptr -> set(attemptID)
 	bufSends map[string]map[string]bool
 
@@ -122,18 +139,20 @@ type ParseState struct {
 // NewParseState creates a fresh parser state.
 func NewParseState(opt Options) *ParseState {
 	return &ParseState{
-		Roles:           make(map[int64]string),
-		Interested:      make(map[int64]struct{}),
-		Active:          make(map[int64]op),
-		Last:            make(map[int64]op),
-		hasSend:         make(map[skey]bool),
-		Opt:             opt,
-		sendsByKey:      make(map[OpKey][]sendRecord),
-		lastChPtrByG:    make(map[int64]string),
-		lastChPtrSeqByG: make(map[int64]int64),
-		eventIndexByG:   make(map[int64]int64),
-		lastValue:       make(map[int64]string),
-		activeAttempt:   make(map[int64]string),
+		Roles:            make(map[int64]string),
+		Interested:       make(map[int64]struct{}),
+		Active:           make(map[int64]op),
+		Last:             make(map[int64]op),
+		hasSend:          make(map[skey]bool),
+		Opt:              opt,
+		sendsByKey:       make(map[OpKey][]sendRecord),
+		lastChPtrByG:     make(map[int64]string),
+		lastChPtrSeqByG:  make(map[int64]int64),
+		lastChNameByG:    make(map[int64]string),
+		lastChNameSeqByG: make(map[int64]int64),
+		eventIndexByG:    make(map[int64]int64),
+		lastValue:        make(map[int64]string),
+		activeAttempt:    make(map[int64]string),
 		attemptsByG: make(map[int64]struct {
 			id, ch, kind, ptr string
 			time              float64
@@ -155,6 +174,7 @@ func NewParseState(opt Options) *ParseState {
 		spawnParentBySID: make(map[string]int64),
 		capByPtr:         make(map[string]int),
 		depthByPtr:       make(map[string]int),
+		channelNameByPtr: make(map[string]string),
 		bufSends:         make(map[string]map[string]bool),
 	}
 }
@@ -198,6 +218,27 @@ func (st *ParseState) consumeFreshChPtr(gid int64) string {
 	}
 	delete(st.lastChPtrByG, gid)
 	delete(st.lastChPtrSeqByG, gid)
+	return ""
+}
+
+func (st *ParseState) consumeFreshChName(gid int64) string {
+	name, ok := st.lastChNameByG[gid]
+	if !ok {
+		return ""
+	}
+	seq := st.lastChNameSeqByG[gid]
+	if seq == 0 {
+		delete(st.lastChNameByG, gid)
+		delete(st.lastChNameSeqByG, gid)
+		return name
+	}
+	if st.eventIndexByG[gid]-seq <= 1 {
+		delete(st.lastChNameByG, gid)
+		delete(st.lastChNameSeqByG, gid)
+		return name
+	}
+	delete(st.lastChNameByG, gid)
+	delete(st.lastChNameSeqByG, gid)
 	return ""
 }
 
@@ -254,6 +295,24 @@ func parseRegionOp(typ string) (kind, ch string, ok bool) {
 	return "", "", false
 }
 
+func parseChNameMessage(msg string) (ptr, name string) {
+	for _, part := range strings.Fields(msg) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.HasPrefix(part, "ptr=") {
+			ptr = strings.TrimPrefix(part, "ptr=")
+			continue
+		}
+		if strings.HasPrefix(part, "name=") {
+			name = strings.TrimPrefix(part, "name=")
+			continue
+		}
+	}
+	return ptr, name
+}
+
 // ProcessEvent translates a trace Event into zero or more TimelineEvents via emit.
 func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) error) error {
 	tsMs := float64(e.Time()) / 1e6
@@ -265,6 +324,11 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 	emit = func(ev TimelineEvent) error {
 		if ev.TimeNs == 0 {
 			ev.TimeNs = tsNs
+		}
+		if ev.ChPtr != "" {
+			ev.MissingPtr = false
+		} else if !ev.MissingPtr {
+			ev.MissingPtr = true
 		}
 		return baseEmit(ev)
 	}
@@ -287,7 +351,24 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 			if ptr != "" {
 				st.lastChPtrByG[gid] = ptr
 				st.lastChPtrSeqByG[gid] = st.eventIndexByG[gid]
-				_ = emit(TimelineEvent{TimeMs: tsMs, Event: "ch_ptr", G: gid, Role: st.Roles[gid], ChPtr: ptr, Source: "log"})
+				_ = emit(TimelineEvent{TimeMs: tsMs, Event: "ch_ptr", G: gid, Role: st.Roles[gid], ChannelKey: ptr, ChPtr: ptr, Source: "log"})
+			}
+			return nil
+		}
+		if l.Category == "ch_name" {
+			msg := strings.TrimSpace(l.Message)
+			if msg != "" {
+				ptr, name := parseChNameMessage(msg)
+				if name == "" {
+					name = msg
+				}
+				if name != "" {
+					st.lastChNameByG[gid] = name
+					st.lastChNameSeqByG[gid] = st.eventIndexByG[gid]
+				}
+				if ptr != "" && name != "" {
+					st.channelNameByPtr[ptr] = name
+				}
 			}
 			return nil
 		}
@@ -302,7 +383,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				if ptr != "" {
 					st.lastChPtrByG[gid] = ptr
 					st.lastChPtrSeqByG[gid] = st.eventIndexByG[gid]
-					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "ch_ptr", G: gid, Role: st.Roles[gid], ChPtr: ptr, Source: "log"})
+					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "ch_ptr", G: gid, Role: st.Roles[gid], ChannelKey: ptr, ChPtr: ptr, Source: "log"})
 					return nil
 				}
 			}
@@ -354,7 +435,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 			if ptr != "" {
 				st.capByPtr[ptr] = capVal
 			}
-			_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_make", G: gid, Role: st.Roles[gid], ChPtr: ptr, Cap: capVal, ElemType: elem, Source: "log"})
+			_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_make", G: gid, Role: st.Roles[gid], ChannelKey: ptr, ChPtr: ptr, Cap: capVal, ElemType: elem, Source: "log"})
 			return nil
 		}
 		// Channel close logs from instrumenter: category "chan_close", message like "ptr=0xc000014120"
@@ -371,7 +452,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 			} else {
 				ptr = msg
 			}
-			_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_close", G: gid, Role: st.Roles[gid], ChPtr: ptr, Source: "log"})
+			_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_close", G: gid, Role: st.Roles[gid], ChannelKey: ptr, ChPtr: ptr, Source: "log"})
 			return nil
 		}
 		if l.Category == "spawn_parent" {
@@ -405,6 +486,23 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 			return nil
 		}
 		// Recognize common role categories. Extend beyond ping/pong.
+		if l.Category == "role" {
+			msg := strings.TrimSpace(l.Message)
+			if msg != "" {
+				st.Roles[gid] = msg
+				st.Interested[gid] = struct{}{}
+				switch msg {
+				case "main":
+					st.lastMainG = gid
+				case "worker":
+					st.lastWorkerG = gid
+				case "server":
+					st.lastServerG = gid
+				case "client":
+					st.lastClientG = gid
+				}
+			}
+		}
 		if l.Category == "main" || l.Category == "worker" || l.Category == "server" || l.Category == "client" {
 			st.Roles[gid] = l.Category
 			st.Interested[gid] = struct{}{}
@@ -555,7 +653,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 									st.depthByPtr[chPtr]--
 								}
 								delete(st.bufSends[chPtr], pairID)
-								_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_depth", G: gid, Channel: att.ch, ChPtr: chPtr, Cap: st.capByPtr[chPtr], Value: st.depthByPtr[chPtr], Source: "region"})
+								_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_depth", G: gid, Channel: att.ch, ChannelKey: chPtr, ChPtr: chPtr, Cap: st.capByPtr[chPtr], Value: st.depthByPtr[chPtr], Source: "region"})
 							}
 						}
 					} else {
@@ -574,7 +672,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 							if st.depthByPtr[chPtr] > st.capByPtr[chPtr] {
 								st.depthByPtr[chPtr] = st.capByPtr[chPtr]
 							}
-							_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_depth", G: gid, Channel: att.ch, ChPtr: chPtr, Cap: st.capByPtr[chPtr], Value: st.depthByPtr[chPtr], Source: "region"})
+							_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_depth", G: gid, Channel: att.ch, ChannelKey: chPtr, ChPtr: chPtr, Cap: st.capByPtr[chPtr], Value: st.depthByPtr[chPtr], Source: "region"})
 						}
 					}
 					delete(st.activeAttempt, gid)
@@ -716,6 +814,15 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 
 func (st *ParseState) handleRegionBegin(kind, ch string, gid int64, role string, ts float64, emit func(TimelineEvent) error) error {
 	chPtr := st.consumeFreshChPtr(gid)
+	chName := st.consumeFreshChName(gid)
+	if chName == "" && chPtr != "" {
+		if mapped, ok := st.channelNameByPtr[chPtr]; ok {
+			chName = mapped
+		}
+	}
+	if chName != "" {
+		ch = chName
+	}
 	st.Active[gid] = op{kind: kind, ch: ch, ptr: chPtr}
 	st.Last[gid] = st.Active[gid]
 	ev := "send_attempt"
@@ -727,7 +834,12 @@ func (st *ParseState) handleRegionBegin(kind, ch string, gid int64, role string,
 		val = v
 		delete(st.lastValue, gid)
 	}
+	ck := parseChKey(ch)
+	channelKey := st.channelKey(ck, chPtr)
 	event := TimelineEvent{TimeMs: ts, Event: ev, Channel: ch, G: gid, Role: role, Source: "region", ChPtr: chPtr, MissingPtr: chPtr == ""}
+	if channelKey != "" {
+		event.ChannelKey = channelKey
+	}
 	if val != "" {
 		event.Value = val
 	}
@@ -834,6 +946,13 @@ func parseChKey(ch string) chKey {
 	return chKey{Name: s, ClientID: -1}
 }
 
+func shouldSkipPairing(key chKey) bool {
+	if len(skipPairingChannels) == 0 {
+		return false
+	}
+	return skipPairingChannels[key.Name]
+}
+
 // handleRegionOp processes the end of a region send/recv and pairs operations by channel key.
 func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role string, t float64, emit func(TimelineEvent) error) error {
 	// Always emit the *_complete event for timelines
@@ -894,6 +1013,9 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 		// Match with the earliest recorded send
 		sr := q[0]
 		st.sendsByKey[st.opKey(key, chPtr)] = q[1:]
+		if shouldSkipPairing(key) {
+			return nil
+		}
 		// Re-emit the matched send at its original time to ensure ordering (idempotent for UI)
 		_ = emit(TimelineEvent{TimeMs: sr.TimeMs, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, sr.Ptr), ChPtr: sr.Ptr, G: sr.G, Role: sr.Role, Source: "region"})
 		// Emit explicit paired events with a logical message id
@@ -1018,4 +1140,8 @@ func (st *ParseState) maybeEmitSelectFallback(gid int64, sid string, stack xtrac
 			return
 		}
 	}
+}
+
+func NormalizeTimeline(events []TimelineEvent, st *ParseState) []TimelineEvent {
+	return events
 }

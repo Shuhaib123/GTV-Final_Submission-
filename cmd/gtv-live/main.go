@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,7 +20,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	xtrace "golang.org/x/exp/trace"
-	event_sink "jspt/cmd/event_sink"
 	"jspt/internal/instrumenter"
 	"jspt/internal/traceproc"
 )
@@ -30,6 +30,11 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true }, // dev only; tighten for prod
 }
 
+const (
+	runJSONTimeout   = 20 * time.Second
+	maxTraceOutBytes = 1 << 20 // 1 MiB guardrail
+)
+
 // Global options configured via flags (with env fallbacks)
 var (
 	listenAddr  string
@@ -37,6 +42,7 @@ var (
 	optDrop     bool
 	optWorkload string
 	optBCMode   string
+	optLiveLog  bool
 )
 
 func envBool(name string) bool {
@@ -64,13 +70,16 @@ func main() {
 	if bcModeDefault == "" {
 		bcModeDefault = "blocking"
 	}
+	liveLogDefault := envBool("GTV_LIVE_LOG")
 	bcModeFlag := flag.String("bc-mode", bcModeDefault, "broadcast mode: buffered|blocking")
+	liveLogFlag := flag.Bool("live-log", liveLogDefault, "write trace.live.<run>.json while running")
 	flag.Parse()
 	listenAddr = *addrFlag
 	optSynth = *synthFlag
 	optDrop = *dropFlag
 	optWorkload = strings.ToLower(*wlFlag)
 	optBCMode = strings.ToLower(*bcModeFlag)
+	optLiveLog = *liveLogFlag
 
 	// Serve static assets from ./web
 	fs := http.FileServer(http.Dir("web"))
@@ -78,7 +87,6 @@ func main() {
 
 	// WebSocket endpoint that streams timeline events while the demo runs.
 	http.HandleFunc("/trace", traceHandler)
-	http.HandleFunc("/trace-sse", traceSSEHandler)
 
 	// Instrumentation endpoint: POST {code, workload_name}
 	http.HandleFunc("/instrument", instrumentHandler)
@@ -110,6 +118,7 @@ type instrumentReq struct {
 	IODB         *bool  `json:"io_db,omitempty"`
 	IOHTTP       *bool  `json:"io_http,omitempty"`
 	IOOS         *bool  `json:"io_os,omitempty"`
+	ValueLogs    *bool  `json:"value_logs,omitempty"`
 }
 
 func instrumentHandler(w http.ResponseWriter, r *http.Request) {
@@ -159,10 +168,13 @@ func instrumentHandler(w http.ResponseWriter, r *http.Request) {
 		if req.IOOS != nil {
 			def.AddIOOSRegions = *req.IOOS
 		}
+		if req.ValueLogs != nil {
+			def.AddValueLogs = *req.ValueLogs
+		}
 		if req.Level != "" {
 			def.Level = strings.ToLower(req.Level)
 		} else {
-			def.Level = "regions_logs"
+			def.Level = "regions"
 		}
 		// Block regions added below if field exists (needs new option)
 		instrumenter.SetOptions(def)
@@ -209,6 +221,8 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	if timeoutQ == "" {
 		timeoutQ = "4s"
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), runJSONTimeout)
+	defer cancel()
 	envBool := func(v string) bool {
 		v = strings.ToLower(strings.TrimSpace(v))
 		return v == "1" || v == "true" || v == "yes"
@@ -228,7 +242,7 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	// Pass a bounded timeout so runs complete and JSON returns
 	// Pass a build tag so only the selected generated workload (if any) is included.
 	tagName := "workload_" + name
-	cmd := exec.Command("go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", name, "-timeout", timeoutQ)
+	cmd := exec.CommandContext(ctx, "go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", name, "-timeout", timeoutQ)
 	// Default bc_mode=blocking unless explicitly provided
 	env := os.Environ()
 	if bcModeQ != "" {
@@ -257,7 +271,8 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer outFile.Close()
-	tee := io.TeeReader(stdout, outFile)
+	limiter := newTraceOutLimiter(outFile, maxTraceOutBytes)
+	tee := io.TeeReader(stdout, limiter)
 	reader, err := xtrace.NewReader(tee)
 	if err != nil {
 		// The runner likely failed to build/launch; include captured stderr for clarity
@@ -293,9 +308,17 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		log.Printf("runOnceHTTP: runner context aborted: %v", ctxErr)
+	} else if waitErr != nil {
+		log.Println("runOnceHTTP: runner wait:", waitErr)
+	}
 	// Deduplicate exact duplicates and write atomically to avoid truncation.
 	timeline = dedupTimeline(timeline)
+	if limiter != nil && limiter.Limited() {
+		log.Printf("trace.out truncated to %d bytes (limit %d)", limiter.written, limiter.max)
+	}
 	if err := writeJSONAtomic("trace.json", timeline); err != nil {
 		log.Println("write trace.json:", err)
 	}
@@ -303,6 +326,9 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Println("write web/trace.json:", err)
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		w.Header().Set("X-Trace-Status", ctxErr.Error())
+	}
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(timeline); err != nil {
 		log.Println("encode timeline:", err)
@@ -361,6 +387,49 @@ func writeJSONAtomic(path string, v any) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+type traceOutLimiter struct {
+	w         io.Writer
+	max       int64
+	written   int64
+	truncated bool
+}
+
+func newTraceOutLimiter(w io.Writer, max int64) *traceOutLimiter {
+	return &traceOutLimiter{w: w, max: max}
+}
+
+func (l *traceOutLimiter) Write(p []byte) (int, error) {
+	if l.max <= 0 {
+		n, err := l.w.Write(p)
+		if err != nil {
+			return n, err
+		}
+		l.written += int64(n)
+		return len(p), nil
+	}
+	remaining := l.max - l.written
+	if remaining <= 0 {
+		l.truncated = true
+		return len(p), nil
+	}
+	toWrite := len(p)
+	if int64(toWrite) > remaining {
+		toWrite = int(remaining)
+		l.truncated = true
+	}
+	if toWrite > 0 {
+		if _, err := l.w.Write(p[:toWrite]); err != nil {
+			return len(p), err
+		}
+		l.written += int64(toWrite)
+	}
+	return len(p), nil
+}
+
+func (l *traceOutLimiter) Limited() bool {
+	return l.truncated
 }
 
 // -------- Workload files hygiene (prevent duplicate-tag compile clashes) --------
@@ -456,12 +525,15 @@ func checkDuplicateWorkloads(dir, tag string) error {
 }
 
 func traceHandler(w http.ResponseWriter, r *http.Request) {
+	// Upgrade to WebSocket. Each handler owns its connection end-to-end.
+	// All writes stay inside runOnce/sendSnapshotWS so we maintain a single writer goroutine.
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("upgrade error:", err)
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(1 << 20) // limit to 1 MiB per frame
 
 	// Parse workload name and options from query
 	q := r.URL.Query()
@@ -486,7 +558,7 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Announce server options to client for HUD display
-	_ = conn.WriteJSON(struct {
+	_ = writeJSONWithDeadline(conn, struct {
 		Type          string `json:"type"`
 		Addr          string `json:"addr"`
 		Synth         bool   `json:"synth"`
@@ -527,11 +599,18 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 const (
-	sseBatchFlushInterval = 150 * time.Millisecond
-	sseBatchSize          = 32
-	eventSinkCapacity     = 4096
-	runHistoryCapacity    = 2000
+	liveEventBuffer    = 4096
+	runHistoryCapacity = 2000
+	writeTimeout       = 5 * time.Second
 )
+
+func writeJSONWithDeadline(conn *websocket.Conn, v any) error {
+	if conn == nil {
+		return nil
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	return conn.WriteJSON(v)
+}
 
 type runHistory struct {
 	mu     sync.Mutex
@@ -592,203 +671,39 @@ func parseSeqID(raw string) int64 {
 	return 0
 }
 
-func sendSnapshot(w io.Writer, flusher http.Flusher, runID string, events []traceproc.TimelineEvent) error {
-	if err := sendSSE(w, flusher, "snapshot_begin", "", map[string]string{"run_id": runID}); err != nil {
-		return err
+func snapshotSeqBounds(events []traceproc.TimelineEvent) (int64, int64) {
+	if len(events) == 0 {
+		return 0, 0
 	}
-	payload := struct {
-		RunID  string                    `json:"run_id"`
-		Events []traceproc.TimelineEvent `json:"events"`
-	}{RunID: runID, Events: events}
-	if err := sendSSE(w, flusher, "snapshot", "", payload); err != nil {
-		return err
-	}
-	return sendSSE(w, flusher, "snapshot_end", "", map[string]string{"run_id": runID})
+	return events[0].Seq, events[len(events)-1].Seq
 }
 
-func traceSSEHandler(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "handler requires http.Flusher", http.StatusInternalServerError)
-		return
+func sendSnapshotWS(conn *websocket.Conn, runID string, events []traceproc.TimelineEvent) (int64, error) {
+	seqStart, seqEnd := snapshotSeqBounds(events)
+	if err := writeJSONWithDeadline(conn, map[string]any{"type": "snapshot_begin", "run_id": runID, "seq_start": seqStart, "seq_end": seqEnd}); err != nil {
+		return seqEnd, err
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	ctx := r.Context()
-	q := r.URL.Query()
-	wl := strings.ToLower(strings.TrimSpace(q.Get("name")))
-	if wl == "" {
-		wl = optWorkload
-	}
-	synthQ := q.Get("synth")
-	dropQ := q.Get("drop_block_no_ch")
-	bcModeQ := q.Get("bc_mode")
-	envBool := func(v string) bool {
-		v = strings.ToLower(strings.TrimSpace(v))
-		return v == "1" || v == "true" || v == "yes"
-	}
-	useSynth := optSynth
-	useDrop := optDrop
-	if synthQ != "" {
-		useSynth = envBool(synthQ)
-	}
-	if dropQ != "" {
-		useDrop = envBool(dropQ)
-	}
-	lastID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
-	_ = cleanupOldWorkloadFiles("internal/workload", wl)
-	if err := checkDuplicateWorkloads("internal/workload", "workload_"+wl); err != nil {
-		_ = sendSSE(w, flusher, "error", "", map[string]string{"error": "workload configuration error: " + err.Error()})
-		return
-	}
-	tagName := "workload_" + wl
-	cmd := exec.Command("go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", wl, "-timeout", "10s")
-	if bcModeQ != "" {
-		cmd.Env = append(os.Environ(), "GTV_BC_MODE="+strings.ToLower(bcModeQ))
-	}
-	cmd.Stderr = os.Stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = sendSSE(w, flusher, "error", "", map[string]string{"error": "runner stdout: " + err.Error()})
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		_ = sendSSE(w, flusher, "error", "", map[string]string{"error": "runner start: " + err.Error()})
-		return
-	}
-	runID := "run-" + time.Now().Format("20060102-150405.000")
-	sink := event_sink.NewEventSink(eventSinkCapacity)
-	sub := sink.Subscribe(lastID)
-	defer sub.Close()
-	history := newRunHistory(runHistoryCapacity)
-
-	if err := sink.Add("server_info", struct {
-		Addr          string `json:"addr"`
-		Synth         bool   `json:"synth"`
-		DropBlockNoCh bool   `json:"drop_block_no_ch"`
-		Workload      string `json:"workload"`
-		BCMode        string `json:"bc_mode,omitempty"`
-	}{Addr: listenAddr, Synth: useSynth, DropBlockNoCh: useDrop, Workload: wl, BCMode: func() string {
-		if bcModeQ != "" {
-			return bcModeQ
-		}
-		return optBCMode
-	}()}); err != nil {
-		log.Println("traceSSEHandler server_info:", err)
-	}
-	if err := sink.Add("run_start", struct {
-		RunID         string `json:"run_id"`
-		StartedUnixMs int64  `json:"started_unix_ms"`
-		Workload      string `json:"workload"`
-	}{RunID: runID, StartedUnixMs: time.Now().UnixMilli(), Workload: wl}); err != nil {
-		log.Println("traceSSEHandler run_start:", err)
-	}
-
-	go func() {
-		defer sink.Close()
-		record := func(ev traceproc.TimelineEvent) error {
-			history.add(ev)
-			return nil
-		}
-		err := streamTraceEvents(stdout, cmd, runID, useSynth, useDrop, func(ev traceproc.TimelineEvent) error {
-			return sink.Add("timeline", ev)
-		}, record)
-		if err != nil {
-			_ = sink.Add("error", map[string]string{"error": "trace read failed: " + err.Error()})
-		}
-		_ = sink.Add("run_end", struct{}{})
-	}()
-
-	lastSeq := parseSeqID(lastID)
-	if since := parseSeqID(q.Get("since_seq")); since > lastSeq {
-		lastSeq = since
-	}
-	if lastSeq == 0 {
-		waitForHistory(history, 200*time.Millisecond)
-		if err := sendSnapshot(w, flusher, runID, history.snapshot()); err != nil {
-			log.Println("traceSSEHandler snapshot:", err)
-		}
-		lastSeq = history.lastSeq()
-	}
-
-	sendBatch := func(batch []event_sink.Event) error {
-		for _, ev := range batch {
-			if ev.Name == "timeline" {
-				var te traceproc.TimelineEvent
-				if err := json.Unmarshal(ev.Payload, &te); err == nil {
-					if te.Seq <= lastSeq {
-						continue
-					}
-					id := fmt.Sprintf("%d", te.Seq)
-					if err := sendSSE(w, flusher, "timeline", id, ev.Payload); err != nil {
-						return err
-					}
-					lastSeq = te.Seq
-					continue
-				}
-			}
-			if err := sendSSE(w, flusher, ev.Name, ev.ID, ev.Payload); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	ticker := time.NewTicker(sseBatchFlushInterval)
-	defer ticker.Stop()
-	batch := make([]event_sink.Event, 0, sseBatchSize)
-	flushBatch := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		if err := sendBatch(batch); err != nil {
-			return err
-		}
-		batch = batch[:0]
-		return nil
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			if err := cmd.Process.Kill(); err != nil {
-				log.Println("traceSSEHandler cmd kill:", err)
-			}
-			if err := flushBatch(); err != nil {
-				log.Println("traceSSEHandler flush:", err)
-			}
-			return
-		case ev, ok := <-sub.Events:
-			if !ok {
-				if err := flushBatch(); err != nil {
-					log.Println("traceSSEHandler flush:", err)
-				}
-				return
-			}
-			batch = append(batch, ev)
-			if len(batch) >= sseBatchSize {
-				if err := flushBatch(); err != nil {
-					log.Println("traceSSEHandler flush:", err)
-					return
-				}
-			}
-		case <-ticker.C:
-			if err := flushBatch(); err != nil {
-				log.Println("traceSSEHandler flush:", err)
-				return
-			}
+	for _, ev := range events {
+		payload := map[string]any{"type": "snapshot_event", "run_id": runID, "seq": ev.Seq, "event": ev}
+		if err := writeJSONWithDeadline(conn, payload); err != nil {
+			return seqEnd, err
 		}
 	}
+	if err := writeJSONWithDeadline(conn, map[string]any{"type": "snapshot_end", "run_id": runID, "seq_end": seqEnd}); err != nil {
+		return seqEnd, err
+	}
+	return seqEnd, nil
 }
 
 // runOnce runs the demo under runtime/trace and streams events over the given WS connection.
 func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) error {
+	// All writes to conn occur in this goroutine (snapshot + live event streaming).
+	// If you ever add ping/status pushes, send them through the same path (or through a dedicated write loop/channel).
 	// Best-effort cleanup of stale duplicate workload files before the duplicate check.
 	_ = cleanupOldWorkloadFiles("internal/workload", wl)
 	// Validate there are no duplicates for this workload tag.
 	if err := checkDuplicateWorkloads("internal/workload", "workload_"+wl); err != nil {
-		_ = conn.WriteJSON(struct {
+		_ = writeJSONWithDeadline(conn, struct {
 			Type  string `json:"type"`
 			Error string `json:"error"`
 		}{Type: "error", Error: "workload configuration error: " + err.Error()})
@@ -814,7 +729,7 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 	outFile, err := os.Create("trace.out")
 	if err != nil {
 		_ = cmd.Process.Kill()
-		_ = conn.WriteJSON(struct {
+		_ = writeJSONWithDeadline(conn, struct {
 			Type  string `json:"type"`
 			Error string `json:"error"`
 		}{Type: "error", Error: "trace.out create: " + err.Error()})
@@ -824,11 +739,58 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 	tee := io.TeeReader(stdout, outFile)
 	runID := "run-" + time.Now().Format("20060102-150405.000")
 	history := newRunHistory(runHistoryCapacity)
-	emit := func(ev traceproc.TimelineEvent) error {
-		return conn.WriteJSON(ev)
+	eventCh := make(chan traceproc.TimelineEvent, liveEventBuffer)
+	liveEventCh := make(chan traceproc.TimelineEvent, liveEventBuffer)
+	bufferReadyCh := make(chan struct{})
+	var bufferReadyOnce sync.Once
+	closeBufferReady := func() {
+		bufferReadyOnce.Do(func() { close(bufferReadyCh) })
 	}
+	defer closeBufferReady()
+	record := func(ev traceproc.TimelineEvent) error {
+		history.add(ev)
+		return nil
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		err := streamTraceEvents(tee, cmd, runID, synth, drop, optLiveLog, func(ev traceproc.TimelineEvent) error {
+			eventCh <- ev
+			return nil
+		}, record)
+		close(eventCh)
+		errCh <- err
+	}()
+	go func() {
+		defer close(liveEventCh)
+		pending := make([]traceproc.TimelineEvent, 0, 64)
+		buffering := true
+		for ev := range eventCh {
+			if buffering {
+				select {
+				case <-bufferReadyCh:
+					buffering = false
+					for _, buffered := range pending {
+						liveEventCh <- buffered
+					}
+					pending = pending[:0]
+				default:
+				}
+			}
+			if buffering {
+				pending = append(pending, ev)
+				continue
+			}
+			liveEventCh <- ev
+		}
+		if buffering {
+			<-bufferReadyCh
+			for _, buffered := range pending {
+				liveEventCh <- buffered
+			}
+		}
+	}()
 	// Announce run start with embedded options and simple metadata
-	_ = conn.WriteJSON(struct {
+	_ = writeJSONWithDeadline(conn, struct {
 		Type          string `json:"type"`
 		Addr          string `json:"addr,omitempty"`
 		Synth         bool   `json:"synth,omitempty"`
@@ -838,36 +800,48 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 		Workload      string `json:"workload,omitempty"`
 		BCMode        string `json:"bc_mode,omitempty"`
 	}{Type: "run_start", Addr: listenAddr, Synth: synth, DropBlockNoCh: drop, RunID: runID, StartedUnixMs: time.Now().UnixMilli(), Workload: wl, BCMode: optBCMode})
-	_ = conn.WriteJSON(struct {
-		Type string `json:"type"`
-	}{Type: "snapshot_begin"})
-	_ = conn.WriteJSON(struct {
-		Type   string                    `json:"type"`
-		RunID  string                    `json:"run_id"`
-		Events []traceproc.TimelineEvent `json:"events"`
-	}{Type: "snapshot", RunID: runID, Events: history.snapshot()})
-	_ = conn.WriteJSON(struct {
-		Type string `json:"type"`
-	}{Type: "snapshot_end"})
-	record := func(ev traceproc.TimelineEvent) error {
-		history.add(ev)
-		return nil
+	waitForHistory(history, 200*time.Millisecond)
+	snapshotEvents := history.snapshot()
+	lastSeq, snapErr := sendSnapshotWS(conn, runID, snapshotEvents)
+	if snapErr != nil {
+		closeBufferReady()
+		_ = cmd.Process.Kill()
+		return snapErr
 	}
-	if err := streamTraceEvents(tee, cmd, runID, synth, drop, emit, record); err != nil {
-		// send error and return
-		_ = conn.WriteJSON(struct {
+	closeBufferReady()
+	sendErr := error(nil)
+	for ev := range liveEventCh {
+		if ev.Seq <= lastSeq {
+			continue
+		}
+		if sendErr != nil {
+			continue
+		}
+		if err := writeJSONWithDeadline(conn, map[string]any{"type": "event", "run_id": runID, "seq": ev.Seq, "event": ev}); err != nil {
+			sendErr = err
+			_ = cmd.Process.Kill()
+			continue
+		}
+		lastSeq = ev.Seq
+	}
+	streamErr := <-errCh
+	if sendErr != nil {
+		return sendErr
+	}
+	if streamErr != nil {
+		_ = writeJSONWithDeadline(conn, struct {
 			Type  string `json:"type"`
 			Error string `json:"error"`
-		}{Type: "error", Error: "trace read failed: " + err.Error()})
-		return err
+		}{Type: "error", Error: "trace read failed: " + streamErr.Error()})
+		return streamErr
 	}
-	_ = conn.WriteJSON(struct {
+	_ = writeJSONWithDeadline(conn, struct {
 		Type string `json:"type"`
 	}{Type: "run_end"})
 	return nil
 }
 
-func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, drop bool, emit func(traceproc.TimelineEvent) error, record func(traceproc.TimelineEvent) error) error {
+func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, drop bool, liveLog bool, emit func(traceproc.TimelineEvent) error, record func(traceproc.TimelineEvent) error) error {
 	traceReader, err := xtrace.NewReader(reader)
 	if err != nil {
 		_ = cmd.Process.Kill()
@@ -875,17 +849,19 @@ func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, dro
 	}
 	opts := traceproc.Options{SynthOnRecv: synth, DropBlockNoCh: drop, EmitAtomic: true}
 	st := traceproc.NewParseState(opts)
-	liveLogPath := fmt.Sprintf("trace.live.%s.json", runID)
 	var liveLogFile *os.File
 	var liveLogCount int
-	if f, err := os.Create(liveLogPath); err != nil {
-		log.Println("live log create:", err)
-	} else {
-		liveLogFile = f
-		if _, err := liveLogFile.WriteString("[\n"); err != nil {
-			log.Println("live log initialize:", err)
-			_ = liveLogFile.Close()
-			liveLogFile = nil
+	if liveLog {
+		liveLogPath := fmt.Sprintf("trace.live.%s.json", runID)
+		if f, err := os.Create(liveLogPath); err != nil {
+			log.Println("live log create:", err)
+		} else {
+			liveLogFile = f
+			if _, err := liveLogFile.WriteString("[\n"); err != nil {
+				log.Println("live log initialize:", err)
+				_ = liveLogFile.Close()
+				liveLogFile = nil
+			}
 		}
 	}
 	defer func() {
@@ -953,40 +929,6 @@ func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, dro
 			return err
 		}
 	}
-}
-
-func sendSSE(w io.Writer, flusher http.Flusher, event, id string, payload any) error {
-	if payload == nil {
-		return nil
-	}
-	var data []byte
-	switch v := payload.(type) {
-	case []byte:
-		data = v
-	case json.RawMessage:
-		data = v
-	default:
-		var err error
-		data, err = json.Marshal(payload)
-		if err != nil {
-			return err
-		}
-	}
-	if id != "" {
-		if _, err := fmt.Fprintf(w, "id: %s\n", id); err != nil {
-			return err
-		}
-	}
-	if event != "" {
-		if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
-			return err
-		}
-	}
-	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
-		return err
-	}
-	flusher.Flush()
-	return nil
 }
 
 func openBrowser(url string) error {

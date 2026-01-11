@@ -160,12 +160,12 @@ func WrapWithRegionCtxExpr(ctx ast.Expr, label ast.Expr, stmt ast.Stmt, gated bo
 func WrapWithStartEndCtxExpr(ctx ast.Expr, label ast.Expr, body ast.Stmt, gated bool) ast.Stmt {
 	// r := trace.StartRegion(ctx, label); defer r.End(); <body>
 	assign := &ast.AssignStmt{
-		Lhs: []ast.Expr{ast.NewIdent("__gtvReg")},
+		Lhs: []ast.Expr{ast.NewIdent("__jspt_reg_0")},
 		Tok: token.DEFINE,
 		Rhs: []ast.Expr{&ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent("trace"), Sel: ast.NewIdent("StartRegion")},
 			Args: []ast.Expr{ctx, label}}},
 	}
-	deferEnd := &ast.DeferStmt{Call: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent("__gtvReg"), Sel: ast.NewIdent("End")}}}
+	deferEnd := &ast.DeferStmt{Call: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent("__jspt_reg_0"), Sel: ast.NewIdent("End")}}}
 	block := &ast.BlockStmt{List: []ast.Stmt{assign, deferEnd, body}}
 	if !gated {
 		return block
@@ -180,17 +180,37 @@ func WrapWithStartEndCtxExpr(ctx ast.Expr, label ast.Expr, body ast.Stmt, gated 
 // Channel identity / lifecycle logs (centralized)
 
 func EmitChPtrLog(expr ast.Expr) ast.Stmt {
+	return EmitChPtrLogWithCtx(expr, "ctx")
+}
+
+func EmitChPtrLogWithCtx(expr ast.Expr, ctxName string) ast.Stmt {
+	if ctxName == "" {
+		return &ast.EmptyStmt{}
+	}
 	// if trace.IsEnabled(){ trace.Log(ctx, "ch_ptr", fmt.Sprintf("ptr=%p", EXPR)) }
-	return mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(ctx,"ch_ptr", fmt.Sprintf("ptr=%%p", %s)) }`, sprint(expr)))
+	return mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s,"ch_ptr", fmt.Sprintf("ptr=%%p", %s)) }`, ctxName, sprint(expr)))
 }
 
-func EmitChanMakeLog(lhs ast.Expr, capExpr ast.Expr, typStr string) ast.Stmt {
-	return mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(ctx,"chan_make", fmt.Sprintf("lhs=%s typ=%s cap=%%v", %s)) }`,
-		sprint(lhs), typStr, sprint(capExpr)))
+func EmitChNameLog(ch ast.Expr, name ast.Expr, ctxName string) ast.Stmt {
+	if ch == nil || name == nil || ctxName == "" {
+		return &ast.EmptyStmt{}
+	}
+	return mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s,"ch_name", fmt.Sprintf("ptr=%%p name=%%s", %s, %s)) }`, ctxName, sprint(ch), sprint(name)))
 }
 
-func EmitChanCloseLog(expr ast.Expr) ast.Stmt {
-	return mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(ctx,"chan_close", fmt.Sprintf("ptr=%%p", %s)) }`, sprint(expr)))
+func EmitChanMakeLog(lhs ast.Expr, capExpr ast.Expr, typStr string, ctxName string) ast.Stmt {
+	if ctxName == "" {
+		return &ast.EmptyStmt{}
+	}
+	return mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s,"chan_make", fmt.Sprintf("lhs=%s typ=%s cap=%%v", %s)) }`,
+		ctxName, sprint(lhs), typStr, sprint(capExpr)))
+}
+
+func EmitChanCloseLog(expr ast.Expr, ctxName string) ast.Stmt {
+	if ctxName == "" {
+		return &ast.EmptyStmt{}
+	}
+	return mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s,"chan_close", fmt.Sprintf("ptr=%%p", %s)) }`, ctxName, sprint(expr)))
 }
 
 // helper: print expr to string (best-effort)

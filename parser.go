@@ -14,13 +14,6 @@ import (
 	"jspt/internal/traceproc"
 )
 
-type DebugLog struct {
-	TimeMs   float64 `json:"time_ms"`
-	G        int64   `json:"g"`
-	Category string  `json:"category"`
-	Message  string  `json:"message"`
-}
-
 // WritePingPongTimelineJSON parses a trace at tracePath and writes a
 // summarized goroutine timeline to jsonPath in JSON format.
 // This reuses the shared event processor used by live streaming.
@@ -42,9 +35,6 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 	var timeline []traceproc.TimelineEvent
 	emit := func(ev traceproc.TimelineEvent) error { timeline = append(timeline, ev); return nil }
 
-	// Collect raw logs for a companion file.
-	var logs []DebugLog
-
 	for {
 		e, err := r.ReadEvent()
 		if err == io.EOF {
@@ -52,10 +42,6 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 		}
 		if err != nil {
 			return err
-		}
-		if e.Kind() == xtrace.EventLog {
-			l := e.Log()
-			logs = append(logs, DebugLog{TimeMs: float64(e.Time()) / 1e6, G: int64(e.Goroutine()), Category: l.Category, Message: l.Message})
 		}
 		if err := traceproc.ProcessEvent(&e, st, emit); err != nil {
 			return err
@@ -126,15 +112,6 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 		return err
 	}
 
-	// Optionally write raw logs to a sibling file for inspection.
-	// Enable via GTV_WRITE_LOGS=1 (default: off)
-	if v := strings.ToLower(os.Getenv("GTV_WRITE_LOGS")); v == "1" || v == "true" || v == "yes" {
-		logsPath := filepath.Join(filepath.Dir(jsonPath), strings.TrimSuffix(filepath.Base(jsonPath), filepath.Ext(jsonPath))+".logs.json")
-		if lf, err := os.Create(logsPath); err == nil {
-			_ = json.NewEncoder(lf).Encode(logs)
-			_ = lf.Close()
-		}
-	}
 	return nil
 }
 
