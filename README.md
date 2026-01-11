@@ -71,6 +71,7 @@ Port: edit `cmd/gtv-live/main.go` (ListenAndServe) to change `:8080`.
 
 Notes:
 - Offline parsing uses the same event processor as live; you can enable `GTV_SYNTH_SEND=1` during `go run .` to synthesize missing sends in JSON too.
+- MVP rule (channel pairing strategy A): emit `chan_send` only at send completion time (no retroactive emission), assign a `MsgID` on send and propagate it to the matched recv, and optionally emit a lightweight `pair` event at recv time.
 
 
 ## How It Works
