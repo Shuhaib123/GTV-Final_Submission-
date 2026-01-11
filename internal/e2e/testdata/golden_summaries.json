@@ -1,0 +1,44 @@
+{
+  "e2ebroadcast": {
+    "nodes": 5,
+    "edges": 5,
+    "paired": 3,
+    "unmatched": 0
+  },
+  "e2ebufferedqueue": {
+    "nodes": 2,
+    "edges": 2,
+    "paired": 2,
+    "unmatched": 0
+  },
+  "e2ecloserange": {
+    "nodes": 3,
+    "edges": 2,
+    "paired": 1,
+    "unmatched": 0
+  },
+  "e2efanoutfanin": {
+    "nodes": 7,
+    "edges": 6,
+    "paired": 11,
+    "unmatched": 0
+  },
+  "e2epingpong": {
+    "nodes": 4,
+    "edges": 4,
+    "paired": 2,
+    "unmatched": 0
+  },
+  "e2epipeline": {
+    "nodes": 7,
+    "edges": 6,
+    "paired": 7,
+    "unmatched": 0
+  },
+  "e2eselectdefault": {
+    "nodes": 3,
+    "edges": 2,
+    "paired": 1,
+    "unmatched": 0
+  }
+}

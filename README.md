@@ -81,6 +81,28 @@ Notes:
 - `internal/traceproc.ProcessEvent` maps `x/exp/trace.Event` → `TimelineEvent` while tracking roles, blocking, and channel intent.
 - The front-end animates edges, blocks, and message flow as events advance.
 
+## Architecture Diagram
+
+```mermaid
+flowchart LR
+  A[runtime/trace] --> B[x/exp/trace.Reader]
+  B --> C[traceproc.ProcessEvent]
+  C --> D[handleRegionOp (pairing)]
+  D -->|emit chan_recv| E[TimelineEvent: chan_recv]
+  D -->|recv end can emit chan_send<br/>with earlier time_ns| F[TimelineEvent: chan_send]
+  C --> G[TimelineEvent stream]
+  G --> H[cmd/gtv-live assigns seq]
+  H --> I[WebSocket /trace]
+  I --> J[web/graph-live.html]
+```
+
+> **Warning**: Live stream is arrival‑ordered; retroactive timestamps can invert send/recv order.
+
+## Ordering Contract
+
+- `time_ns` is the authoritative timestamp; it originates in the trace reader and is preserved through processing.
+- `seq` is the authoritative arrival/order index for the live stream; it is assigned in `cmd/gtv-live` when events are emitted over WebSocket.
+
 
 ## Troubleshooting
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -106,8 +105,13 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 		}
 	}
 
+	timeline = traceproc.NormalizeTimeline(timeline)
 	// Deduplicate exact duplicates for stability
-	timeline = dedupTimeline(timeline)
+	var audit traceproc.DedupAudit
+	timeline, audit = traceproc.DedupTimeline(timeline)
+	timeline = traceproc.AppendAuditSummary(timeline, audit)
+	payload := traceproc.NormalizeTimeline(timeline, st)
+	if err := writeJSONAtomic(jsonPath, payload); err != nil {
 	if err := writeJSONAtomic(jsonPath, timeline); err != nil {
 		return err
 	}
@@ -129,7 +133,13 @@ func dedupTimeline(in []traceproc.TimelineEvent) []traceproc.TimelineEvent {
 		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
 			att = ev.ID
 		}
-		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
+		ch := ev.Channel
+		if ev.ChannelKey != "" {
+			ch = ev.ChannelKey
+		} else if ev.ChPtr != "" {
+			ch = ev.ChPtr
+		}
+		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ch, ev.Event, att)
 		if _, ok := seen[key]; ok {
 			continue
 		}
