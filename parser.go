@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -107,36 +106,14 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 	}
 
 	// Deduplicate exact duplicates for stability
-	timeline = dedupTimeline(timeline)
+	var audit traceproc.DedupAudit
+	timeline, audit = traceproc.DedupTimeline(timeline)
+	timeline = traceproc.AppendAuditSummary(timeline, audit)
 	if err := writeJSONAtomic(jsonPath, timeline); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-// dedupTimeline removes exact duplicate parser emissions while preserving order.
-// Key: time_ns (or derived from time_ms) + g + channel + event + attempt_id
-func dedupTimeline(in []traceproc.TimelineEvent) []traceproc.TimelineEvent {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]traceproc.TimelineEvent, 0, len(in))
-	for _, ev := range in {
-		tns := ev.TimeNs
-		if tns == 0 {
-			tns = int64(ev.TimeMs*1e6 + 0.5)
-		}
-		att := ev.AttemptID
-		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
-			att = ev.ID
-		}
-		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, ev)
-	}
-	return out
 }
 
 // writeJSONAtomic writes JSON to a temp file then renames atomically to avoid truncation.
