@@ -57,6 +57,9 @@
         ></span
       ></label>
       <label class="mini" style="margin-left: 8px"
+        >Warnings <span id="warningsCountLive" class="mini" style="margin-left: 4px"></span
+      ></label>
+      <label class="mini" style="margin-left: 8px"
         >Labels <input id="toggleLabelsLive" type="checkbox" checked
       /></label>
       <label class="mini" style="margin-left: 8px"
@@ -165,6 +168,7 @@
         <div id="hudBlocks" class="list"></div>
       </div>
       <div id="notesPanel" class="notes-panel"></div>
+      <div id="warningsPanel" class="warnings-panel"></div>
     </div>
 
     <script>
@@ -188,6 +192,18 @@
       // Select summaries for compact HUD: sid -> { chosen:string|null, dropped:string[] }
       const selectSummary = new Map();
       const gNotes = $("#notes");
+      const warningsPanel = $("#warningsPanel");
+      const warningsCountLive = $("#warningsCountLive");
+
+      function escapeHtml(str = "") {
+        return String(str || "").replace(/[&<>"']/g, (s) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[s]);
+      }
 
       let rawEvents = [];
       let events = []; // with dt
@@ -2003,6 +2019,7 @@
         // Accept either {events:[...]} or plain array
         let data = JSON.parse(text);
         const arr = Array.isArray(data) ? data : data.events || [];
+        const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
         if (!Array.isArray(arr) || arr.length === 0) {
           alert(
             "This JSON has no events array. Please load trace.json (not logs)."
@@ -2045,6 +2062,7 @@
         scheduleTopologyRebuild();
         // Do not pre-seed nodes/channels here; let them appear as
         // events fire via Play/Step/Scrub to reflect true ordering.
+        renderWarningsPanel(warnings);
       }
 
       $("#btnLoad").onclick = () => $("#file").click();
@@ -2054,6 +2072,23 @@
         const text = await f.text();
         await loadJSON(text);
       };
+
+      function renderWarningsPanel(entries) {
+        if (!warningsPanel) return;
+        const list = Array.isArray(entries) ? entries : [];
+        if (warningsCountLive) {
+          warningsCountLive.textContent = list.length ? `${list.length}` : "";
+        }
+        if (!list.length) {
+          warningsPanel.classList.remove("open");
+          warningsPanel.innerHTML = "";
+          return;
+        }
+        warningsPanel.classList.add("open");
+        warningsPanel.innerHTML = list
+          .map((entry) => `<div class="warning-row">${escapeHtml(entry)}</div>`)
+          .join("");
+      }
 
       $("#btnPlay").onclick = () => {
         ui.animating = true;
@@ -2691,6 +2726,7 @@
           setPlaying(false);
         } catch {}
         stopFlowLoop();
+        renderWarningsPanel([]);
         events.length = 0;
         rawEvents.length = 0;
         allChannels = [];
