@@ -58,6 +58,9 @@
         ></span
       ></label>
       <label class="mini" style="margin-left: 8px"
+        >Warnings <span id="warningsCountLive" class="mini" style="margin-left: 4px"></span
+      ></label>
+      <label class="mini" style="margin-left: 8px"
         >Labels <input id="toggleLabelsLive" type="checkbox" checked
       /></label>
       <label class="mini" style="margin-left: 8px"
@@ -166,6 +169,7 @@
         <div id="hudBlocks" class="list"></div>
       </div>
       <div id="notesPanel" class="notes-panel"></div>
+      <div id="warningsPanel" class="warnings-panel"></div>
     </div>
 
     <script>
@@ -196,6 +200,18 @@
           enableSelectScaffolding: params.get("select") === "1",
         };
       })();
+      const warningsPanel = $("#warningsPanel");
+      const warningsCountLive = $("#warningsCountLive");
+
+      function escapeHtml(str = "") {
+        return String(str || "").replace(/[&<>"']/g, (s) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[s]);
+      }
 
       let rawEvents = [];
       let events = []; // with dt
@@ -302,6 +318,17 @@
         if (evt.channel_key) return evt.channel_key;
         return fallback || "chan";
       }
+      function channelIdentity(evt) {
+        if (!evt) return null;
+        if (evt.ch_ptr) return String(evt.ch_ptr);
+        if (evt.channel_key) return String(evt.channel_key);
+        if (evt.channel) return String(evt.channel);
+        return null;
+      }
+      function channelKeyForEvent(evt) {
+        const identity = channelIdentity(evt);
+        return identity ? normalizeChannelId(identity) : null;
+      }
       function canonicalChannelId(evt) {
         if (!evt) return "ch:chan";
         if (typeof evt === "string") return normalizeChannelId(evt);
@@ -309,6 +336,19 @@
         if (evt.channel_key) return `ch:${evt.channel_key}`;
         if (evt.channel) return `ch:${evt.channel}`;
         return "ch:chan";
+      }
+      function tokenAnimationAllowed(evt) {
+        if (!evt || typeof evt.event !== "string") return false;
+        const name = evt.event.toLowerCase();
+        if (name === "chan_send" || name === "chan_recv") {
+          const src = String(evt.source || evt.Source || "").toLowerCase();
+          if (src !== "paired") return false;
+          return !!channelIdentity(evt);
+        }
+        if (name === "chan_send_commit" || name === "chan_recv_commit") {
+          return !!channelIdentity(evt);
+        }
+        return false;
       }
 
       const ui = {
@@ -655,6 +695,41 @@
         } catch {}
       }
 
+      /* ========= Animations ========= */
+      let activeTokenDot = null;
+      function animateDot(x1, y1, x2, y2, kind = "send", durMs = 400) {
+        if (activeTokenDot) {
+          try {
+            activeTokenDot.remove();
+          } catch {}
+          activeTokenDot = null;
+        }
+        const dot = circle(x1, y1, 5, `dot ${kind}`);
+        activeTokenDot = dot;
+        gAnims.appendChild(dot);
+        let last = performance.now();
+        let elapsed = 0; // only accumulates when ui.animating is true
+        function step(now) {
+          if (!ui.animating) {
+            last = now;
+            requestAnimationFrame(step);
+            return;
+          }
+          elapsed += now - last;
+          last = now;
+          const p = Math.min(1, elapsed / durMs);
+          const x = x1 + (x2 - x1) * p,
+            y = y1 + (y2 - y1) * p;
+          dot.setAttribute("cx", x);
+          dot.setAttribute("cy", y);
+          if (p < 1) requestAnimationFrame(step);
+          else {
+            dot.remove();
+            if (activeTokenDot === dot) activeTokenDot = null;
+          }
+        }
+        requestAnimationFrame(step);
+      }
       // Keep a list of drawn edges so dragging nodes updates them.
       const drawnEdges = [];
       const spawnEdges = [];
@@ -919,8 +994,6 @@
 
       /* ========= Pairing (order-agnostic) ========= */
       const pending = { sends: new Map(), recvs: new Map() };
-      const lastSendChByG = new Map();
-      const lastRecvChByG = new Map();
       function qFor(map, ch) {
         let q = map.get(ch);
         if (!q) {
@@ -930,7 +1003,6 @@
         return q;
       }
       function onSend(ch, g, t, val) {
-        lastSendChByG.set(g, ch);
         const rq = qFor(pending.recvs, ch);
         if (rq.length) {
           const r = rq.shift();
@@ -946,7 +1018,6 @@
         }
       }
       function onRecv(ch, g, t, val) {
-        lastRecvChByG.set(g, ch);
         const sq = qFor(pending.sends, ch);
         if (sq.length) {
           const s = sq.shift();
@@ -1021,6 +1092,7 @@
         $("#clock").textContent = `t=0.000ms`;
         gEdges.innerHTML = "";
         gAnims.innerHTML = "";
+        activeTokenDot = null;
         gNodes.innerHTML = "";
         gLabels.innerHTML = "";
         gNotes.innerHTML = "";
@@ -1040,8 +1112,6 @@
         // Clear pairing/lookup state
         pending.sends.clear();
         pending.recvs.clear();
-        lastSendChByG.clear();
-        lastRecvChByG.clear();
         edgesByKey.clear();
         blockedEdgeByKey.clear();
         blockedIntentByKey.clear();
@@ -1223,7 +1293,8 @@
         if (typeof e.g !== "number") return false;
         const role = info.role;
         const identity = info.identity;
-        const key = `${role}:${e.g}:${identity}`;
+        const chKey = normalizeChannelId(identity);
+        const key = `${role}:${e.g}:${chKey}`;
         let edObj = edgesByKey.get(key);
         const chLabel = info.chLabel || channelLabelCandidate(e, "chan");
         const chId = canonicalChannelId(e);
@@ -1245,6 +1316,7 @@
             b,
             kind: role,
             ch: chLabel,
+            chKey,
             g: e.g,
             baseText: base,
             ptr: e.ch_ptr || null,
@@ -1257,7 +1329,7 @@
           recordEdgeTiming(edObj, e);
           updateEdge(edObj);
           const binfo = state.blocked.get(e.g);
-          const bk = `${e.g}:${edObj.ch}:${edObj.kind}`;
+          const bk = `${e.g}:${edObj.chKey}:${edObj.kind}`;
           if (binfo && binfo.start != null && blockedIntentByKey.has(bk)) {
             edObj.path.classList.add("blocked");
             blockedEdgeByKey.set(bk, edObj);
@@ -1267,7 +1339,7 @@
         } else {
           recordEdgeTiming(edObj, e);
         }
-        if (animate && edObj) {
+        if (animate && edObj && tokenAnimationAllowed(e)) {
           if (role === "send")
             animateDot(edObj.a.x, edObj.a.y, edObj.b.x, edObj.b.y, "send", 350);
           else
@@ -1464,25 +1536,15 @@
             ensureGoroutine(e.g, e.role || "?", e.func);
             onBlocked(e.g, t);
             addNote(kind, e.time_ms, "blocking", e.g);
-            // Capture intent for edge-level blocked decoration
+            // Capture intent for edge-level blocked decoration (only if channel is explicit)
             try {
-              // Prefer explicit channel from event, else infer
-              let chGuess = e.channel || null;
-              const last =
-                lastSendChByG.get(e.g) || lastRecvChByG.get(e.g) || null;
-              if (last) chGuess = last;
-              if (!chGuess) {
-                const role = (e.role || "").toLowerCase();
-                if (role === "main" || e.g === 1) chGuess = "ping";
-                else if (role === "worker") chGuess = "pong";
-              }
-              if (!chGuess && allChannels.length) chGuess = allChannels[0];
-              if (chGuess) {
+              const chKey = channelKeyForEvent(e);
+              if (chKey) {
                 const kind2 = kind.endsWith("send") ? "send" : "recv";
-                const bk = `${e.g}:${chGuess}:${kind2}`;
+                const bk = `${e.g}:${chKey}:${kind2}`;
                 blockedIntentByKey.add(bk);
                 // If the edge already exists (e.g., blocked_receive after recv drawn), decorate now
-                const edNow = edgesByKey.get(`${kind2}:${e.g}:${chGuess}`);
+                const edNow = edgesByKey.get(`${kind2}:${e.g}:${chKey}`);
                 const binfo = state.blocked.get(e.g);
                 if (edNow && binfo && binfo.start != null) {
                   edNow.path.classList.add("blocked");
@@ -1497,7 +1559,7 @@
             addNote("unblocked", e.time_ms, "blocking", e.g);
             // Clear decoration for this g+channel if known; otherwise clear all for g
             (function () {
-              const ch = e.channel || null;
+              const ch = channelKeyForEvent(e);
               const kinds = ["send", "recv"];
               if (ch) {
                 kinds.forEach((k) => {
@@ -1605,6 +1667,7 @@
                   b: ch,
                   kind: "send",
                   ch: chNameEff,
+                  chKey,
                   g: e.g,
                   baseText: base,
                 };
@@ -1640,11 +1703,12 @@
                     label: lbl,
                     a: sender,
                     b: ch,
-                    kind: "send",
-                    ch: chNameEff,
-                    g: e.peer_g,
-                    baseText: base,
-                  };
+                  kind: "send",
+                  ch: chNameEff,
+                  chKey,
+                  g: e.peer_g,
+                  baseText: base,
+                };
                   edge._ed = edObj;
                   lbl._ed = edObj;
                   drawnEdges.push(edObj);
@@ -1693,17 +1757,18 @@
               }
               // Otherwise, fall through to legacy path
             }
-            // Pairing: prefer send_attempt and recv_complete; plain events behave as before
-            if (
-              meta.role === "send" &&
-              (meta.phase === "attempt" || meta.phase === "plain")
-            )
-              onSend(chNameEff, e.g, t, e.value);
-            if (
-              meta.role === "recv" &&
-              (meta.phase === "complete" || meta.phase === "plain")
-            )
-              onRecv(chNameEff, e.g, t, e.value);
+            if (tokenAnimationAllowed(e)) {
+              if (
+                meta.role === "send" &&
+                (meta.phase === "attempt" || meta.phase === "plain")
+              )
+                onSend(chNameEff, e.g, t, e.value);
+              if (
+                meta.role === "recv" &&
+                (meta.phase === "complete" || meta.phase === "plain")
+              )
+                onRecv(chNameEff, e.g, t, e.value);
+            }
             // Upgrade the recv attempt edge to commit if we have a matching attempt_id; stash otherwise
             if (kind === "chan_recv_commit") {
               if (e.attempt_id && attemptEdges.has(e.attempt_id)) {
@@ -1796,6 +1861,7 @@
                 b,
                 kind: meta.role === "send" ? "send" : "recv",
                 ch: chNameEff,
+                chKey,
                 g: e.g,
                 baseText: base,
                 ptr: e.ch_ptr || null,
@@ -1873,7 +1939,7 @@
               // Decorate if currently blocked on this specific op
               try {
                 const binfo = state.blocked.get(e.g);
-                const bk = `${e.g}:${edObj.ch}:${edObj.kind}`;
+                const bk = `${e.g}:${edObj.chKey}:${edObj.kind}`;
                 if (
                   binfo &&
                   binfo.start != null &&
@@ -1887,7 +1953,7 @@
               resolveLabelOverlaps();
             }
             // Animate when we see an event
-            if (animate && edObj) {
+            if (animate && edObj && tokenAnimationAllowed(e)) {
               if (meta.role === "send")
                 animateDot(
                   edObj.a.x,
@@ -2001,6 +2067,7 @@
         // Accept either {events:[...]} or plain array
         let data = JSON.parse(text);
         const arr = Array.isArray(data) ? data : data.events || [];
+        const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
         if (!Array.isArray(arr) || arr.length === 0) {
           alert(
             "This JSON has no events array. Please load trace.json (not logs)."
@@ -2060,6 +2127,7 @@
         scheduleTopologyRebuild();
         // Do not pre-seed nodes/channels here; let them appear as
         // events fire via Play/Step/Scrub to reflect true ordering.
+        renderWarningsPanel(warnings);
       }
 
       $("#btnLoad").onclick = () => $("#file").click();
@@ -2069,6 +2137,23 @@
         const text = await f.text();
         await loadJSON(text);
       };
+
+      function renderWarningsPanel(entries) {
+        if (!warningsPanel) return;
+        const list = Array.isArray(entries) ? entries : [];
+        if (warningsCountLive) {
+          warningsCountLive.textContent = list.length ? `${list.length}` : "";
+        }
+        if (!list.length) {
+          warningsPanel.classList.remove("open");
+          warningsPanel.innerHTML = "";
+          return;
+        }
+        warningsPanel.classList.add("open");
+        warningsPanel.innerHTML = list
+          .map((entry) => `<div class="warning-row">${escapeHtml(entry)}</div>`)
+          .join("");
+      }
 
       $("#btnPlay").onclick = () => {
         ui.animating = true;
@@ -2748,6 +2833,7 @@
           setPlaying(false);
         } catch {}
         stopFlowLoop();
+        renderWarningsPanel([]);
         events.length = 0;
         rawEvents.length = 0;
         allChannels = [];
