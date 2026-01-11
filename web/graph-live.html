@@ -1093,9 +1093,11 @@
         const gs = Array.from(
           new Set(events.map((e) => e.g).filter((g) => g != null))
         );
-        const chs = Array.from(
-          new Set(events.map((e) => e.channel).filter(Boolean))
-        );
+        const chs = new Set();
+        events.forEach((e) => {
+          const chId = canonicalChannelId(e);
+          if (chId) chs.add(chId);
+        });
         gs.forEach((g) => ensureGoroutine(g, undefined, undefined));
         chs.forEach((c) => ensureChannel(c));
       }

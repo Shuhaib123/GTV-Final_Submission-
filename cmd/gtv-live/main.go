@@ -356,7 +356,13 @@ func dedupTimeline(in []traceproc.TimelineEvent) []traceproc.TimelineEvent {
 		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
 			att = ev.ID
 		}
-		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
+		ch := ev.Channel
+		if ev.ChannelKey != "" {
+			ch = ev.ChannelKey
+		} else if ev.ChPtr != "" {
+			ch = ev.ChPtr
+		}
+		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ch, ev.Event, att)
 		if _, ok := seen[key]; ok {
 			continue
 		}
