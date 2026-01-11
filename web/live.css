@@ -89,7 +89,7 @@ body {
 .dot.recv { fill: var(--recv) }
 
 .hud { position: absolute; right: 10px; top: 10px; background:#0d1429; border:1px solid #22305a; border-radius:.75rem; padding:.6rem .7rem; min-width:260px }
-.hud, .notes-panel { pointer-events: none; }
+.hud, .notes-panel, .warnings-panel { pointer-events: none; }
 .hud h3 { margin:.2rem 0 .4rem; font-size:13px; color:var(--muted) }
 .mini { font-size: 12px; color: var(--muted) }
 .list { max-height: 160px; overflow: auto; margin-top: .25rem }
@@ -98,3 +98,7 @@ body {
 .notes-panel { position:absolute; right:10px; top:140px; background:#0d1429; border:1px solid #22305a; border-radius:.75rem; padding:.4rem .6rem; width:280px; max-height:55vh; overflow:auto }
 .note-card { border:1px dashed #38507c; border-radius:8px; padding:6px 8px; margin:6px 0; color:var(--fg); font-size:12px }
 .note-card .title { font-weight:600 }
+.warnings-panel { position:absolute; left:10px; top:140px; background:#1a1316; border:1px solid #3a1f2a; border-radius:.75rem; padding:.4rem .6rem; width:300px; max-height:55vh; overflow:auto; display:none }
+.warnings-panel.open { display:block; }
+.warnings-panel .warning-row { border-bottom:1px solid #36212a; padding:6px 0; font-size:12px; color:#f2b6be }
+.warnings-panel .warning-row:last-child { border-bottom:none }

@@ -35,6 +35,12 @@
                         </button>
                         <div id="notesPanel" class="notes-panel" aria-live="polite"></div>
                 </div>
+                <div class="warnings-area">
+                        <button id="warningsListButton" class="notes-button" type="button">
+                                Warnings <span id="warningsListCount" class="mini"></span>
+                        </button>
+                        <div id="warningsPanel" class="warnings-panel" aria-live="polite"></div>
+                </div>
         </div>
 
         <div class="hint">drag nodes · scroll to zoom · hover for details</div>
@@ -120,6 +126,9 @@ function refreshGraphExtentFromNodes(nodes) {
                 const notesPanelEl = document.getElementById('notesPanel');
                 const notesToggleBtn = document.getElementById('notesListButton');
                 const notesCountBadge = document.getElementById('notesListCount');
+                const warningsPanelEl = document.getElementById('warningsPanel');
+                const warningsToggleBtn = document.getElementById('warningsListButton');
+                const warningsCountBadge = document.getElementById('warningsListCount');
                 let lastZoomK = 1;
                 let labelsEnabled = false;
                 function escapeHtml(str = '') {
@@ -145,10 +154,28 @@ function refreshGraphExtentFromNodes(nodes) {
                                 return `<div class="note-row"><span class="note-time">t=${formatNoteTime(entry.time_ms)}</span><span class="note-text">${html}</span></div>`;
                         }).join('');
                 }
+                function renderWarningsPanel(entries) {
+                        if (!warningsPanelEl) return;
+                        const list = Array.isArray(entries) ? entries : [];
+                        if (warningsCountBadge) warningsCountBadge.textContent = list.length ? `${list.length}` : '';
+                        if (!list.length) {
+                                warningsPanelEl.innerHTML = '<div class="warnings-panel-empty">No warnings reported.</div>';
+                                return;
+                        }
+                        warningsPanelEl.innerHTML = list.map(entry => {
+                                return `<div class="warning-row">${escapeHtml(entry)}</div>`;
+                        }).join('');
+                }
                 if (notesToggleBtn && notesPanelEl) {
                         notesToggleBtn.addEventListener('click', () => {
                                 const visible = notesPanelEl.classList.toggle('open');
                                 notesToggleBtn.classList.toggle('active', visible);
+                        });
+                }
+                if (warningsToggleBtn && warningsPanelEl) {
+                        warningsToggleBtn.addEventListener('click', () => {
+                                const visible = warningsPanelEl.classList.toggle('open');
+                                warningsToggleBtn.classList.toggle('active', visible);
                         });
                 }
                         (async function () {
@@ -259,7 +286,9 @@ function refreshGraphExtentFromNodes(nodes) {
                         try {
                                 const raw = await fetch('trace.json').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
                                 const arr = Array.isArray(raw) ? raw : (raw.events || []);
+                                const warnings = Array.isArray(raw?.warnings) ? raw.warnings : [];
                                 updateOptsHUDFromTrace(arr);
+                                renderWarningsPanel(warnings);
                                 render(arr);
                         } catch (err) {
                                 console.warn('Failed to load trace.json:', err);
@@ -1336,7 +1365,9 @@ function refreshGraphExtentFromNodes(nodes) {
                                                 catch (e) { alert('Invalid JSON: ' + e.message); return; }
                                                 try {
                                                         const arr = Array.isArray(data) ? data : (data.events || []);
+                                                        const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
                                                         updateOptsHUDFromTrace(arr);
+                                                        renderWarningsPanel(warnings);
                                                         overlay.remove(); d3.select('#graph').selectAll('*').remove(); render(arr); setupBottomLoader();
                                                 }
                                                 catch (e) { console.error(e); alert('Render error: ' + e.message); }
@@ -1357,7 +1388,9 @@ function refreshGraphExtentFromNodes(nodes) {
                                                 catch (e) { alert('Invalid JSON: ' + e.message); return; }
                                                 try {
                                                         const arr = Array.isArray(data) ? data : (data.events || []);
+                                                        const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
                                                         updateOptsHUDFromTrace(arr);
+                                                        renderWarningsPanel(warnings);
                                                         d3.select('#graph').selectAll('*').remove(); render(arr);
                                                 }
                                                 catch (e) { console.error(e); alert('Render error: ' + e.message); }

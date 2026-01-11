@@ -71,6 +71,7 @@ Port: edit `cmd/gtv-live/main.go` (ListenAndServe) to change `:8080`.
 
 Notes:
 - Offline parsing uses the same event processor as live; you can enable `GTV_SYNTH_SEND=1` during `go run .` to synthesize missing sends in JSON too.
+- MVP rule (channel pairing strategy A): emit `chan_send` only at send completion time (no retroactive emission), assign a `MsgID` on send and propagate it to the matched recv, and optionally emit a lightweight `pair` event at recv time.
 
 
 ## How It Works
@@ -79,6 +80,28 @@ Notes:
 - Live server wraps the workload with `runtime/trace` and streams events from `x/exp/trace.Reader` over WebSocket as `TimelineEvent` JSON.
 - `internal/traceproc.ProcessEvent` maps `x/exp/trace.Event` → `TimelineEvent` while tracking roles, blocking, and channel intent.
 - The front-end animates edges, blocks, and message flow as events advance.
+
+## Architecture Diagram
+
+```mermaid
+flowchart LR
+  A[runtime/trace] --> B[x/exp/trace.Reader]
+  B --> C[traceproc.ProcessEvent]
+  C --> D[handleRegionOp (pairing)]
+  D -->|emit chan_recv| E[TimelineEvent: chan_recv]
+  D -->|recv end can emit chan_send<br/>with earlier time_ns| F[TimelineEvent: chan_send]
+  C --> G[TimelineEvent stream]
+  G --> H[cmd/gtv-live assigns seq]
+  H --> I[WebSocket /trace]
+  I --> J[web/graph-live.html]
+```
+
+> **Warning**: Live stream is arrival‑ordered; retroactive timestamps can invert send/recv order.
+
+## Ordering Contract
+
+- `time_ns` is the authoritative timestamp; it originates in the trace reader and is preserved through processing.
+- `seq` is the authoritative arrival/order index for the live stream; it is assigned in `cmd/gtv-live` when events are emitted over WebSocket.
 
 
 ## Troubleshooting

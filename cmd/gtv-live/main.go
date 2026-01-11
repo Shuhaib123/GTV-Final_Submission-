@@ -320,15 +320,19 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if waitErr != nil {
 		log.Println("runOnceHTTP: runner wait:", waitErr)
 	}
+	timeline = traceproc.NormalizeTimeline(timeline)
 	// Deduplicate exact duplicates and write atomically to avoid truncation.
-	timeline = dedupTimeline(timeline)
+	var audit traceproc.DedupAudit
+	timeline, audit = traceproc.DedupTimeline(timeline)
+	timeline = traceproc.AppendAuditSummary(timeline, audit)
+	payload := traceproc.NormalizeTimeline(timeline, st)
 	if limiter != nil && limiter.Limited() {
 		log.Printf("trace.out truncated to %d bytes (limit %d)", limiter.written, limiter.max)
 	}
-	if err := writeJSONAtomic("trace.json", timeline); err != nil {
+	if err := writeJSONAtomic("trace.json", payload); err != nil {
 		log.Println("write trace.json:", err)
 	}
-	if err := writeJSONAtomic(filepath.Join("web", "trace.json"), timeline); err != nil {
+	if err := writeJSONAtomic(filepath.Join("web", "trace.json"), payload); err != nil {
 		log.Println("write web/trace.json:", err)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -336,7 +340,7 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Trace-Status", ctxErr.Error())
 	}
 	enc := json.NewEncoder(w)
-	if err := enc.Encode(timeline); err != nil {
+	if err := enc.Encode(payload); err != nil {
 		log.Println("encode timeline:", err)
 	}
 }
@@ -362,7 +366,13 @@ func dedupTimeline(in []traceproc.TimelineEvent) []traceproc.TimelineEvent {
 		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
 			att = ev.ID
 		}
-		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
+		ch := ev.Channel
+		if ev.ChannelKey != "" {
+			ch = ev.ChannelKey
+		} else if ev.ChPtr != "" {
+			ch = ev.ChPtr
+		}
+		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ch, ev.Event, att)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -371,6 +381,7 @@ func dedupTimeline(in []traceproc.TimelineEvent) []traceproc.TimelineEvent {
 	}
 	return out
 }
+
 
 // writeJSONAtomic writes JSON to a temp file in the same directory and renames atomically.
 func writeJSONAtomic(path string, v any) error {
