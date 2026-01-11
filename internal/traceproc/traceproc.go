@@ -979,6 +979,10 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 	case "send":
 		mid := st.nextMsgID
 		st.nextMsgID++
+		if err := emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid}); err != nil {
+			return err
+		}
+
 		st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr, MsgID: mid})
 		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid})
 		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid})
@@ -1037,6 +1041,7 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 		if shouldSkipPairing(key) {
 			return nil
 		}
+		// Emit explicit paired events with the logical message id assigned on send.
 		// Re-emit the matched send completion at its original time to ensure ordering (idempotent for UI)
 		_ = emit(TimelineEvent{TimeMs: sr.TimeMs, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, sr.Ptr), ChPtr: sr.Ptr, G: sr.G, Role: sr.Role, Source: "region"})
 		// Emit explicit recv with the pre-assigned message id
