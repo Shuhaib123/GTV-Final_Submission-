@@ -345,6 +345,38 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// dedupTimeline removes exact duplicate parser emissions while preserving order.
+// Key: time_ns (or derived from time_ms) + g + channel + event + attempt_id
+func dedupTimeline(in []traceproc.TimelineEvent) []traceproc.TimelineEvent {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]traceproc.TimelineEvent, 0, len(in))
+	for _, ev := range in {
+		tns := ev.TimeNs
+		if tns == 0 {
+			// derive from ms if ns not present; 1ms = 1e6 ns
+			tns = int64(ev.TimeMs*1e6 + 0.5)
+		}
+		att := ev.AttemptID
+		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
+			att = ev.ID
+		}
+		ch := ev.Channel
+		if ev.ChannelKey != "" {
+			ch = ev.ChannelKey
+		} else if ev.ChPtr != "" {
+			ch = ev.ChPtr
+		}
+		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ch, ev.Event, att)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ev)
+	}
+	return out
+}
+
+
 // writeJSONAtomic writes JSON to a temp file in the same directory and renames atomically.
 func writeJSONAtomic(path string, v any) error {
 	dir := filepath.Dir(path)
