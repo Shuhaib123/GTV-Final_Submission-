@@ -338,6 +338,9 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 		if ev.TimeNs == 0 {
 			ev.TimeNs = tsNs
 		}
+		if ev.Seq == 0 {
+			ev.Seq = st.eventIndexByG[gid]
+		}
 		if ev.ChPtr != "" {
 			ev.MissingPtr = false
 		} else if !ev.MissingPtr {
@@ -939,6 +942,7 @@ type sendRecord struct {
 	G      int64
 	Role   string
 	Ptr    string
+	MsgID  int64
 }
 
 func parseChKey(ch string) chKey {
@@ -973,7 +977,10 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 	}
 	switch kind {
 	case "send":
-		st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr})
+		mid := st.nextMsgID
+		st.nextMsgID++
+		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid})
+		st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr, MsgID: mid})
 	case "recv":
 		q := st.sendsByKey[st.opKey(key, chPtr)]
 		if len(q) == 0 {
@@ -1010,11 +1017,14 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 					sg = gid
 				}
 			}
+			mid := st.nextMsgID
+			st.nextMsgID++
 			if err := emit(TimelineEvent{TimeMs: t - 0.001, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, chPtr), G: sg, Role: st.Roles[sg], Source: "synth", ChPtr: chPtr}); err != nil {
 				return err
 			}
+			_ = emit(TimelineEvent{TimeMs: t - 0.001, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: sg, Role: st.Roles[sg], Source: "paired", PeerG: gid, MsgID: mid})
 			// Also emit an unmatched recv with unknown peer for explicitness
-			_ = emit(TimelineEvent{TimeMs: t, Event: "chan_recv", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: 0})
+			_ = emit(TimelineEvent{TimeMs: t, Event: "chan_recv", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: sg, MsgID: mid})
 			return nil
 		}
 		// Match with the earliest recorded send
@@ -1023,13 +1033,7 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 		if shouldSkipPairing(key) {
 			return nil
 		}
-		// Re-emit the matched send at its original time to ensure ordering (idempotent for UI)
-		_ = emit(TimelineEvent{TimeMs: sr.TimeMs, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, sr.Ptr), ChPtr: sr.Ptr, G: sr.G, Role: sr.Role, Source: "region"})
-		// Emit explicit paired events with a logical message id
-		mid := st.nextMsgID
-		st.nextMsgID++
-		_ = emit(TimelineEvent{TimeMs: sr.TimeMs, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, sr.Ptr), ChPtr: sr.Ptr, G: sr.G, Role: sr.Role, Source: "paired", PeerG: gid, MsgID: mid})
-		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_recv", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: sr.G, MsgID: mid})
+		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_recv", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: sr.G, MsgID: sr.MsgID})
 	}
 	return nil
 }

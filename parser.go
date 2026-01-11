@@ -105,6 +105,7 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 		}
 	}
 
+	timeline = traceproc.NormalizeTimeline(timeline)
 	// Deduplicate exact duplicates for stability
 	var audit traceproc.DedupAudit
 	timeline, audit = traceproc.DedupTimeline(timeline)

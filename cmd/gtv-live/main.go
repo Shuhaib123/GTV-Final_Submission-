@@ -314,6 +314,7 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if waitErr != nil {
 		log.Println("runOnceHTTP: runner wait:", waitErr)
 	}
+	timeline = traceproc.NormalizeTimeline(timeline)
 	// Deduplicate exact duplicates and write atomically to avoid truncation.
 	var audit traceproc.DedupAudit
 	timeline, audit = traceproc.DedupTimeline(timeline)
