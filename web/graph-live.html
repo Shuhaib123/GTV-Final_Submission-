@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="live.css" />
     <script src="topology.js"></script>
     <script src="topology-builder.js"></script>
+    <script src="state-machine.js"></script>
   </head>
 
   <body>
@@ -188,6 +189,13 @@
       // Select summaries for compact HUD: sid -> { chosen:string|null, dropped:string[] }
       const selectSummary = new Map();
       const gNotes = $("#notes");
+      const featureFlags = (() => {
+        const params = new URLSearchParams(location.search);
+        return {
+          enableIORegions: params.get("io") === "1",
+          enableSelectScaffolding: params.get("select") === "1",
+        };
+      })();
 
       let rawEvents = [];
       let events = []; // with dt
@@ -647,31 +655,6 @@
         } catch {}
       }
 
-      /* ========= Animations ========= */
-      function animateDot(x1, y1, x2, y2, kind = "send", durMs = 400) {
-        const dot = circle(x1, y1, 5, `dot ${kind}`);
-        gAnims.appendChild(dot);
-        let last = performance.now();
-        let elapsed = 0; // only accumulates when ui.animating is true
-        function step(now) {
-          if (!ui.animating) {
-            last = now;
-            requestAnimationFrame(step);
-            return;
-          }
-          elapsed += now - last;
-          last = now;
-          const p = Math.min(1, elapsed / durMs);
-          const x = x1 + (x2 - x1) * p,
-            y = y1 + (y2 - y1) * p;
-          dot.setAttribute("cx", x);
-          dot.setAttribute("cy", y);
-          if (p < 1) requestAnimationFrame(step);
-          else dot.remove();
-        }
-        requestAnimationFrame(step);
-      }
-
       // Keep a list of drawn edges so dragging nodes updates them.
       const drawnEdges = [];
       const spawnEdges = [];
@@ -684,6 +667,27 @@
       const blockedEdgeByKey = new Map(); // `${g}:${ch}:${kind}` -> edObj
       // Intent captured at blocked_* time before we see the actual edge event
       const blockedIntentByKey = new Set(); // keys `${g}:${ch}:${kind}`
+      const stateMachine = window.GTVStateMachine?.createStateMachine({
+        ui,
+        gAnims,
+        circle,
+        drawnEdges,
+      });
+      const animateDot =
+        stateMachine?.animateDot ||
+        function () {
+          return;
+        };
+      const startFlowLoop =
+        stateMachine?.startFlowLoop ||
+        function () {
+          return;
+        };
+      const stopFlowLoop =
+        stateMachine?.stopFlowLoop ||
+        function () {
+          return;
+        };
       // Bundling overlay updater
       function groupKey(ref) {
         const f = String(ref.func || "");
@@ -910,38 +914,6 @@
             a.y + a.height < b.y ||
             b.y + b.height < a.y
           );
-        }
-      }
-
-      // ======= Post-run flow loop (infinite pulses) =======
-      const flowLoop = { running: false, idx: 0, timer: null };
-      function startFlowLoop() {
-        if (flowLoop.running || drawnEdges.length === 0) return;
-        flowLoop.running = true;
-        flowLoop.idx = 0;
-        const STEP_MS = 250,
-          DUR_MS = 500; // pacing for pulses
-        (function tick() {
-          if (!flowLoop.running) return;
-          const ed = drawnEdges[flowLoop.idx % drawnEdges.length];
-          if (ed)
-            animateDot(
-              ed.a.x,
-              ed.a.y,
-              ed.b.x,
-              ed.b.y,
-              ed.kind || "send",
-              DUR_MS
-            );
-          flowLoop.idx++;
-          flowLoop.timer = setTimeout(tick, STEP_MS);
-        })();
-      }
-      function stopFlowLoop() {
-        flowLoop.running = false;
-        if (flowLoop.timer) {
-          clearTimeout(flowLoop.timer);
-          flowLoop.timer = null;
         }
       }
 
@@ -1307,11 +1279,35 @@
         return true;
       }
 
+      function isSelectEvent(kind) {
+        return typeof kind === "string" && kind.startsWith("select_");
+      }
+      function isIORegionEvent(kind) {
+        if (typeof kind !== "string") return false;
+        return (
+          kind === "chan_send_attempt" ||
+          kind === "chan_recv_attempt" ||
+          kind === "chan_send_commit" ||
+          kind === "chan_recv_commit" ||
+          kind === "send_attempt" ||
+          kind === "recv_attempt" ||
+          kind === "send_complete" ||
+          kind === "recv_complete" ||
+          kind === "chan_depth"
+        );
+      }
       function fire(e, animate) {
         if (e && e.diagnostic_only) return;
         const kind = e.event;
         const t = e.dt;
         if (typeof kind !== "string") return;
+        const kindLower = kind.toLowerCase();
+        if (!featureFlags.enableSelectScaffolding && isSelectEvent(kindLower)) {
+          return;
+        }
+        if (!featureFlags.enableIORegions && isIORegionEvent(kindLower)) {
+          return;
+        }
         if (handleTopologyEvent(e, animate)) return;
         // helper: classify channel ops including attempt/complete variants
         const classify = (k, ch) => {
@@ -1960,6 +1956,7 @@
         if (!e || typeof e !== "object") return null;
         return {
           time_ms: e.time_ms ?? e.t ?? e.TimeMs ?? e.timeMs ?? 0,
+          time_ns: e.time_ns ?? e.timeNs ?? e.TimeNs ?? null,
           dt: 0,
           event: e.event ?? e.Event ?? "",
           g: e.g ?? e.gid ?? e.G ?? null,
@@ -1990,6 +1987,7 @@
           select_id: e.select_id ?? e.selectId ?? e.SelectID ?? null,
           peer_g: e.peer_g ?? e.peerG ?? e.PeerG ?? null,
           msg_id: e.msg_id ?? e.msgId ?? e.MsgID ?? null,
+          seq: e.seq ?? e.Seq ?? null,
 
           source: e.source ?? e.Source ?? null,
           diagnostic_only: e.diagnostic_only ?? e.diagnosticOnly ?? false,
@@ -2018,9 +2016,22 @@
         rawEvents = arr;
         // Normalize fields (backward-compat with your trace.json)
         events = arr
-          .map(normalizeIncomingEvent)
+          .map((entry, idx) => {
+            const normalized = normalizeIncomingEvent(entry);
+            if (!normalized) return null;
+            if (!normalized.time_ns) {
+              normalized.time_ns = Math.round(normalized.time_ms * 1e6);
+            }
+            if (!normalized.seq) {
+              normalized.seq = idx + 1;
+            }
+            return normalized;
+          })
           .filter((e) => e && typeof e.event === "string" && e.event.length)
-          .sort((a, b) => a.time_ms - b.time_ms);
+          .sort((a, b) => {
+            if (a.time_ns !== b.time_ns) return a.time_ns - b.time_ns;
+            return (a.seq || 0) - (b.seq || 0);
+          });
 
         if (!events.length) {
           alert("No valid events found in JSON. Ensure you loaded trace.json.");
@@ -2028,7 +2039,11 @@
         }
         // Gather all distinct channels so we can create them at channel creation time.
         allChannels = Array.from(
-          new Set(events.map((e) => e.channel).filter(Boolean))
+          new Set(
+            events
+              .map((e) => GTVTopology.channelIdentityForEvent(e))
+              .filter(Boolean)
+          )
         );
         t0 = events[0]?.time_ms ?? 0;
         events.forEach((e) => (e.dt = e.time_ms - t0));
@@ -2631,6 +2646,7 @@
       const LIVE_REBUILD_MS = 200;
       let liveRebuildLast = 0;
       let liveRebuildPending = false;
+      let liveSeq = 0;
       function requestLiveRebuild() {
         const now = performance.now();
         const since = now - liveRebuildLast;
@@ -2648,20 +2664,61 @@
           scheduleTopologyRebuild();
         }, delay);
       }
+      function compareEvents(a, b) {
+        if (a.time_ns !== b.time_ns) return a.time_ns - b.time_ns;
+        return (a.seq || 0) - (b.seq || 0);
+      }
+      function insertSortedEvent(list, evt) {
+        let lo = 0;
+        let hi = list.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (compareEvents(list[mid], evt) <= 0) {
+            lo = mid + 1;
+          } else {
+            hi = mid;
+          }
+        }
+        list.splice(lo, 0, evt);
+        return lo;
+      }
       function handleLiveTimelineEvent(e) {
         const evt = normalizeIncomingEvent(e);
         if (!evt) return;
 
-        if (!t0) t0 = evt.time_ms;
+        if (!evt.time_ns) {
+          evt.time_ns = Math.round(evt.time_ms * 1e6);
+        }
+        if (!evt.seq) {
+          liveSeq += 1;
+          evt.seq = liveSeq;
+        }
+        if (!t0 || evt.time_ms < t0) {
+          t0 = evt.time_ms;
+          events.forEach((item) => {
+            item.dt = item.time_ms - t0;
+          });
+        }
         evt.dt = evt.time_ms - t0;
 
-        events.push(evt);
+        let insertIdx = insertSortedEvent(events, evt);
         if (events.length > LIVE_EVENT_CAP) {
           const overflow = events.length - LIVE_EVENT_CAP;
           events.splice(0, overflow);
+          if (insertIdx < overflow) {
+            insertIdx = 0;
+          } else {
+            insertIdx -= overflow;
+          }
           ui.nextIdx = Math.max(0, ui.nextIdx - overflow);
         }
-        T = evt.dt;
+        if (insertIdx <= ui.nextIdx) {
+          try {
+            fire(evt, ui.playing);
+          } catch {}
+          ui.nextIdx += 1;
+        }
+        T = events.length ? events[events.length - 1].dt : 0;
         const TARGET_MS = 4000;
         ui.scale = T > 0 ? T / TARGET_MS : 1;
         const stats = document.getElementById("hudStats");
