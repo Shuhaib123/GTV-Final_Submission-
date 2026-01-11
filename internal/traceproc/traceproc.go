@@ -3,6 +3,7 @@ package traceproc
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -52,6 +53,14 @@ type TimelineEvent struct {
 	// Optional select fields
 	SelectID string `json:"select_id,omitempty"`
 	Dropped  bool   `json:"select_dropped,omitempty"`
+}
+
+const TimelineSchemaVersion = 1
+
+type TimelineEnvelope struct {
+	SchemaVersion int             `json:"schema_version"`
+	Events        []TimelineEvent `json:"events"`
+	Warnings      []string        `json:"warnings,omitempty"`
 }
 
 // Options control live/offline behavior.
@@ -755,9 +764,6 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				} else if op, ok := st.Last[gid]; ok && op.kind == "send" {
 					ch = op.ch
 				}
-				if ch == "" && st.Opt.DropBlockNoCh {
-					return nil
-				}
 				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_send", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
 					return err
 				}
@@ -772,9 +778,6 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 					ch = op.ch
 				} else if op, ok := st.Last[gid]; ok && op.kind == "recv" {
 					ch = op.ch
-				}
-				if ch == "" && st.Opt.DropBlockNoCh {
-					return nil
 				}
 				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_receive", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
 					return err
@@ -1142,6 +1145,101 @@ func (st *ParseState) maybeEmitSelectFallback(gid int64, sid string, stack xtrac
 	}
 }
 
-func NormalizeTimeline(events []TimelineEvent, st *ParseState) []TimelineEvent {
-	return events
+func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope {
+	_ = st
+	normalized := make([]TimelineEvent, len(events))
+	warnings := make([]string, 0)
+	for i, ev := range events {
+		if ev.TimeNs == 0 {
+			ev.TimeNs = int64(ev.TimeMs*1e6 + 0.5)
+		}
+		if ev.Seq == 0 {
+			ev.Seq = int64(i + 1)
+		}
+		name := strings.ToLower(ev.Event)
+		if isGoroutineEvent(name) && ev.G == 0 {
+			warnings = append(warnings, fmt.Sprintf("missing goroutine id for %s (seq=%d time_ns=%d)", ev.Event, ev.Seq, ev.TimeNs))
+		}
+		if isChannelEvent(name) {
+			if timelineChannelIdentity(ev) == "" {
+				unknown := fmt.Sprintf("unknown:%d:%d", ev.G, ev.Seq)
+				if ev.Channel == "" {
+					ev.Channel = unknown
+				}
+				if ev.ChannelKey == "" {
+					ev.ChannelKey = unknown
+				}
+				warnings = append(warnings, fmt.Sprintf("missing channel identity for %s (g=%d seq=%d time_ns=%d)", ev.Event, ev.G, ev.Seq, ev.TimeNs))
+			}
+		}
+		if isPairingEvent(name, ev.Source) {
+			if ev.PeerG == 0 && ev.PairID == "" && ev.MsgID == 0 {
+				warnings = append(warnings, fmt.Sprintf("missing pairing fields for %s (g=%d seq=%d time_ns=%d)", ev.Event, ev.G, ev.Seq, ev.TimeNs))
+			}
+		}
+		normalized[i] = ev
+	}
+	sort.SliceStable(normalized, func(i, j int) bool {
+		a := normalized[i]
+		b := normalized[j]
+		if a.TimeNs != b.TimeNs {
+			return a.TimeNs < b.TimeNs
+		}
+		if a.Seq != b.Seq {
+			return a.Seq < b.Seq
+		}
+		if a.G != b.G {
+			return a.G < b.G
+		}
+		return strings.ToLower(a.Event) < strings.ToLower(b.Event)
+	})
+	return TimelineEnvelope{
+		SchemaVersion: TimelineSchemaVersion,
+		Events:        normalized,
+		Warnings:      warnings,
+	}
+}
+
+func timelineChannelIdentity(ev TimelineEvent) string {
+	if ev.ChPtr != "" {
+		return ev.ChPtr
+	}
+	if ev.ChannelKey != "" {
+		return ev.ChannelKey
+	}
+	return ev.Channel
+}
+
+func isGoroutineEvent(name string) bool {
+	switch name {
+	case "goroutine_created", "goroutine_started", "go_start", "spawn", "worker_starting", "channels_created",
+		"blocked_send", "blocked_receive", "unblocked", "block", "unblock",
+		"select_begin", "select_case", "select_chosen", "select_dropped", "select_end":
+		return true
+	default:
+		return false
+	}
+}
+
+func isChannelEvent(name string) bool {
+	switch name {
+	case "chan_make", "chan_close", "chan_send", "chan_recv", "chan_depth",
+		"send_complete", "recv_attempt", "recv_complete",
+		"chan_send_attempt", "chan_recv_attempt", "chan_send_commit", "chan_recv_commit",
+		"blocked_send", "blocked_receive", "block", "unblock", "select_case":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPairingEvent(name, source string) bool {
+	switch name {
+	case "chan_send", "chan_recv":
+		return strings.ToLower(source) == "paired"
+	case "chan_send_commit", "chan_recv_commit":
+		return true
+	default:
+		return false
+	}
 }

@@ -108,7 +108,8 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 
 	// Deduplicate exact duplicates for stability
 	timeline = dedupTimeline(timeline)
-	if err := writeJSONAtomic(jsonPath, timeline); err != nil {
+	payload := traceproc.NormalizeTimeline(timeline, st)
+	if err := writeJSONAtomic(jsonPath, payload); err != nil {
 		return err
 	}
 

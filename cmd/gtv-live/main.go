@@ -316,13 +316,14 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Deduplicate exact duplicates and write atomically to avoid truncation.
 	timeline = dedupTimeline(timeline)
+	payload := traceproc.NormalizeTimeline(timeline, st)
 	if limiter != nil && limiter.Limited() {
 		log.Printf("trace.out truncated to %d bytes (limit %d)", limiter.written, limiter.max)
 	}
-	if err := writeJSONAtomic("trace.json", timeline); err != nil {
+	if err := writeJSONAtomic("trace.json", payload); err != nil {
 		log.Println("write trace.json:", err)
 	}
-	if err := writeJSONAtomic(filepath.Join("web", "trace.json"), timeline); err != nil {
+	if err := writeJSONAtomic(filepath.Join("web", "trace.json"), payload); err != nil {
 		log.Println("write web/trace.json:", err)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -330,7 +331,7 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Trace-Status", ctxErr.Error())
 	}
 	enc := json.NewEncoder(w)
-	if err := enc.Encode(timeline); err != nil {
+	if err := enc.Encode(payload); err != nil {
 		log.Println("encode timeline:", err)
 	}
 }
