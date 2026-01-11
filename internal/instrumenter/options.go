@@ -18,6 +18,7 @@ type Options struct {
 	AddHTTPHandlerTasks bool
 	AddGRPCTasks        bool
 	AddLoopRegions      bool
+	AddValueLogs        bool
 
 	AddIORegions       bool
 	AddIOJSONRegions   bool
@@ -32,13 +33,14 @@ type Options struct {
 
 // Default options (you can tune these to your current defaults)
 var instrOpts = Options{
-	Level:               "",
+	Level:               "regions",
 	GuardDynamicLabels:  true,
 	AddGoroutineRegions: true,
 	AddBlockRegions:     true,
 	AddHTTPHandlerTasks: false,
 	AddGRPCTasks:        false,
 	AddLoopRegions:      false,
+	AddValueLogs:        false,
 
 	AddIORegions:       false,
 	AddIOJSONRegions:   false,
@@ -63,6 +65,11 @@ func boolEnv(name string, def bool) bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
+// ValueLogsEnv reports whether the shared value-logging flag is enabled.
+func ValueLogsEnv(def bool) bool {
+	return boolEnv("GTV_LOG_VALUES", def)
+}
+
 // ParseOptionsFromEnvAndDirectives merges defaults, env, optional JSON config,
 // package include/exclude, and top-of-file // gtv:* directives.
 //
@@ -85,6 +92,7 @@ func ParseOptionsFromEnvAndDirectives(file *ast.File, base Options) (opts Option
 	opts.IOAssumeBackground = boolEnv("GTV_INSTR_IO_ASSUME_BG", opts.IOAssumeBackground)
 	opts.AddGRPCTasks = boolEnv("GTV_INSTR_GRPC_TASKS", opts.AddGRPCTasks)
 	opts.AddLoopRegions = boolEnv("GTV_INSTR_LOOP_REGIONS", opts.AddLoopRegions)
+	opts.AddValueLogs = boolEnv("GTV_LOG_VALUES", opts.AddValueLogs)
 	if lvl := strings.TrimSpace(os.Getenv("GTV_INSTR_LEVEL")); lvl != "" {
 		opts.Level = strings.ToLower(lvl)
 	}

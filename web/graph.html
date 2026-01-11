@@ -7,6 +7,8 @@
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="stylesheet" href="base.css" />
         <link rel="stylesheet" href="offline.css" />
+        <script src="topology.js"></script>
+        <script src="topology-builder.js"></script>
 </head>
 
 <body>
@@ -92,10 +94,34 @@
         <!-- D3 v7 -->
         <script src="https://unpkg.com/d3@7.9.0/dist/d3.min.js"></script>
         <script>
-                let graphExtent = null;
+let graphExtent = null;
+function refreshGraphExtentFromNodes(nodes) {
+        const candidates = nodes || window._gtvGraphNodes || [];
+        if (!candidates || !candidates.length) {
+                graphExtent = null;
+                window._gtvGraphExtent = null;
+                return;
+        }
+        const xs = candidates.filter(n => Number.isFinite(n.x)).map(n => n.x);
+        const ys = candidates.filter(n => Number.isFinite(n.y)).map(n => n.y);
+        if (!xs.length || !ys.length) {
+                graphExtent = null;
+                window._gtvGraphExtent = null;
+                return;
+        }
+        const padding = 96;
+        const minX = Math.min(...xs) - padding;
+        const maxX = Math.max(...xs) + padding;
+        const minY = Math.min(...ys) - padding;
+        const maxY = Math.max(...ys) + padding;
+        graphExtent = { minX, maxX, minY, maxY };
+        window._gtvGraphExtent = graphExtent;
+}
                 const notesPanelEl = document.getElementById('notesPanel');
                 const notesToggleBtn = document.getElementById('notesListButton');
                 const notesCountBadge = document.getElementById('notesListCount');
+                let lastZoomK = 1;
+                let labelsEnabled = false;
                 function escapeHtml(str = '') {
                         return String(str || '').replace(/[&<>"']/g, s => ({
                                 '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -245,9 +271,16 @@
                         setupBottomLoader();
                         // Default: hide labels for readability; toggle to show
                         try { document.body.classList.add('hide-edge-labels'); } catch {}
-                        try { document.getElementById('toggleLabels').addEventListener('change', (e) => {
-                                document.body.classList.toggle('hide-edge-labels', !e.target.checked);
-                        }); } catch {}
+                        try {
+                                const labelsToggle = document.getElementById('toggleLabels');
+                                if (labelsToggle) {
+                                        labelsToggle.checked = labelsEnabled;
+                                        labelsToggle.addEventListener('change', (e) => {
+                                                labelsEnabled = !!e.target.checked;
+                                                renderLabels(lastZoomK);
+                                        });
+                                }
+                        } catch {}
                         try { document.getElementById('toggleSynth').addEventListener('change', (e) => {
                                 document.body.classList.toggle('hide-synth', !e.target.checked);
                         }); } catch {}
@@ -274,32 +307,23 @@
                         // Renders the graph for a given trace JSON array.
                         function render(trace) {
                                 /*** ==== Build nodes & links from the json ==== ***/
-                        const goroutines = new Map();
-                        const channels = new Map();
-                        const depthByKey = new Map();
-                        const splitPref = (function(){ try { return localStorage.getItem('gtv.split') === '1'; } catch { return false } })();
-                        function stripSuffix(key) {
-                                if (!key) return key;
-                                const idx = key.indexOf('#g');
-                                if (idx >= 0 && idx + 2 < key.length) {
-                                        const tail = key.slice(idx + 2);
-                                        if (/^\d+$/.test(tail)) {
-                                                return key.slice(0, idx);
-                                        }
-                                }
-                                return key;
-                        }
-                        function labelPriority(lbl) {
-                                if (!lbl) return 0;
-                                const low = String(lbl).toLowerCase();
-                                if (low.startsWith('clientout')) return 40;
-                                if (low.startsWith('serverout')) return 35;
-                                if (low.startsWith('client')) return 25;
-                                if (low.startsWith('server')) return 20;
-                                if (low.startsWith('reg')) return 15;
-                                if (low.startsWith('join')) return 12;
-                                return 0;
-                        }
+                const topology = GTVTopologyBuilder.buildTopology(trace);
+                const goroutines = topology.goroutines;
+                const channels = topology.channels;
+                const depthByKey = topology.depthByKey;
+                const links = topology.links.slice();
+                const splitPref = (function(){ try { return localStorage.getItem('gtv.split') === '1'; } catch { return false } })();
+                function labelPriority(lbl) {
+                        if (!lbl) return 0;
+                        const low = String(lbl).toLowerCase();
+                        if (low.startsWith('clientout')) return 40;
+                        if (low.startsWith('serverout')) return 35;
+                        if (low.startsWith('client')) return 25;
+                        if (low.startsWith('server')) return 20;
+                        if (low.startsWith('reg')) return 15;
+                        if (low.startsWith('join')) return 12;
+                        return 0;
+                }
                         function shortChannelPtr(ptr) {
                                 if (!ptr) return '';
                                 const match = /0x[0-9a-fA-F]+/.exec(ptr);
@@ -308,64 +332,20 @@
                                 if (eq >= 0) return ptr.slice(eq + 1);
                                 return String(ptr);
                         }
-                        function channelIdentityForEvent(e) {
-                                if (!e) return undefined;
-                                if (e.ch_ptr) return e.ch_ptr;
-                                const candidate = e.channel_key || e.channel;
-                                if (!candidate) return undefined;
-                                return stripSuffix(candidate);
-                        }
-                        function channelLabelForEvent(e) {
-                                if (!e) return 'chan';
-                                if (e.channel) return e.channel;
-                                if (e.channel_key) return e.channel_key;
-                                if (e.ch_ptr) return e.ch_ptr;
-                                return 'chan';
-                        }
-                        function channelNodeId(e) {
-                                const key = channelIdentityForEvent(e);
-                                if (key) return `ch:${key}`;
-                                return `ch:${channelLabelForEvent(e) || 'chan'}`;
-                        }
-                        for (const e of trace) {
-                                if (e.g !== undefined && e.role) goroutines.set(e.g, { id: `g${e.g}`, label: `g${e.g}`, role: e.role, func: e.func });
-                                const key = channelIdentityForEvent(e);
-                                if (key) {
-                                        const id = channelNodeId(e);
-                                        let info = channels.get(key);
-                                        if (!info) {
-                                                info = {
-                                                        key,
-                                                        id,
-                                                        ptr: key && key.startsWith('ptr=') ? key : undefined,
-                                                        cap: undefined,
-                                                        elem_type: undefined,
-                                                        labelCounts: new Map()
-                                                };
+                        const attemptToSelect = new Map();
+                        const selectSummary = new Map();
+                        try {
+                                for (const e of trace) {
+                                        if ((e.event === 'select_chosen' || e.event === 'select_dropped') && e.attempt_id) {
+                                                const sid = e.select_id || '';
+                                                attemptToSelect.set(e.attempt_id, sid);
+                                                if (!selectSummary.has(sid)) selectSummary.set(sid, { chosen: null, dropped: [] });
+                                                const sum = selectSummary.get(sid);
+                                                if (e.event === 'select_chosen') sum.chosen = e.attempt_id;
+                                                else sum.dropped.push(e.attempt_id);
                                         }
-                                        if (!info.ptr && e.ch_ptr) info.ptr = e.ch_ptr;
-                                        info.id = id;
-                                        const label = channelLabelForEvent(e);
-                                        const candidates = new Set();
-                                        if (label) candidates.add(label);
-                                        if (e.channel) candidates.add(e.channel);
-                                        if (e.channel_key) candidates.add(e.channel_key);
-                                        candidates.forEach(lbl => {
-                                                if (!lbl) return;
-                                                info.labelCounts.set(lbl, (info.labelCounts.get(lbl) || 0) + 1);
-                                        });
-                                        if (e.event === 'chan_make') {
-                                                if (e.cap != null) info.cap = e.cap;
-                                                if (e.elem_type) info.elem_type = e.elem_type;
-                                        }
-                                        channels.set(key, info);
                                 }
-                                if (e.event === 'chan_depth') {
-                                        const k2 = channelIdentityForEvent(e);
-                                        if (k2) depthByKey.set(k2, e.value);
-                                }
-                        }
-
+                        } catch {}
                         const labelGroups = new Map();
                         channels.forEach((info) => {
                                 if (!info.labelCounts || !info.labelCounts.size) {
@@ -424,7 +404,8 @@
                                         // No toggle element or pref: auto-enable for large graphs
                                         return goroutines.size >= 60;
                                 } catch { return goroutines.size >= 60 }
-                        })();
+                                })();
+
                         function clusterKeyOf(g){
                                 const parts = String(g.func||'').split('.');
                                 if (parts.length >= 2) return parts.slice(-2).join('.');
@@ -488,6 +469,36 @@
                                 nodes.push({ id: c.id, label: `${c.label} (${c.members.length})`, shortLabel: `${c.members.length}`, type: 'cluster', role: c.role, members: c.members.slice(), x: pos.x, y: pos.y });
                         });
 
+                        // --- Redirect topology links to cluster nodes when a goroutine endpoint is hidden ---
+                        function normalizeEndpoint(ep) {
+                                if (!ep) return ep;
+                                if (typeof ep === 'string') return ep;
+                                if (typeof ep === 'object' && typeof ep.id === 'string') return ep.id;
+                                return ep;
+                        }
+                        function redirectGToCluster(id) {
+                                if (typeof id !== 'string') return id;
+                                if (!id.startsWith('g')) return id;
+                                const cl = memberToCluster.get(id);
+                                if (cl && isCollapsedCluster(cl)) return cl.id;
+                                return id;
+                        }
+                        for (const l of links) {
+                                const s = redirectGToCluster(normalizeEndpoint(l.source));
+                                const t = redirectGToCluster(normalizeEndpoint(l.target));
+                                l.source = s;
+                                l.target = t;
+                        }
+                        const nodeIds = new Set(nodes.map(n => n.id));
+                        const beforeLinks = links.length;
+                        for (let i = links.length - 1; i >= 0; i--) {
+                                const s = normalizeEndpoint(links[i].source);
+                                const t = normalizeEndpoint(links[i].target);
+                                if (!nodeIds.has(s) || !nodeIds.has(t)) links.splice(i, 1);
+                        }
+                        const dropped = beforeLinks - links.length;
+                        if (dropped) console.warn('[graph] dropped links with missing endpoints:', dropped);
+
                         // If there is no saved layout for some nodes, assign a simple layered deterministic layout
                         ;(function layeredLayout(){
                           const counts = { main:0, worker:0, chan:0 };
@@ -512,27 +523,8 @@
                             nodes.forEach(place);
                         })();
 
-                                (function updateGraphExtent() {
-                                        if (!nodes || nodes.length === 0) {
-                                                graphExtent = null;
-                                                window._gtvGraphExtent = null;
-                                                return;
-                                        }
-                                        const xs = nodes.filter(n => Number.isFinite(n.x)).map(n => n.x);
-                                        const ys = nodes.filter(n => Number.isFinite(n.y)).map(n => n.y);
-                                        if (!xs.length || !ys.length) {
-                                                graphExtent = null;
-                                                window._gtvGraphExtent = null;
-                                                return;
-                                        }
-                                        const padding = 96;
-                                        const minX = Math.min(...xs) - padding;
-                                        const maxX = Math.max(...xs) + padding;
-                                        const minY = Math.min(...ys) - padding;
-                                        const maxY = Math.max(...ys) + padding;
-                                        graphExtent = { minX, maxX, minY, maxY };
-                                        window._gtvGraphExtent = graphExtent;
-                                })();
+                                window._gtvGraphNodes = nodes;
+                                refreshGraphExtentFromNodes(nodes);
 
                                 // Build annotations (non-channel events) as note nodes with dotted links.
                                 const noteEvents = new Set(['channels_created', 'worker_starting', 'goroutine_created', 'blocked_send', 'blocked_receive', 'unblocked', 'goroutine_started', 'select_begin', 'select_chosen', 'select_end', 'select_dropped', 'chan_close']);
@@ -562,182 +554,6 @@
                                 }
                                 noteEntries.sort((a, b) => (a.time_ms || 0) - (b.time_ms || 0));
                                 renderNotesPanel(noteEntries);
-
-                                function pushLink(acc, source, target, kind, e, seq) {
-                                        // Redirect goroutine endpoints to cluster if collapsed
-                                        function redirect(id){
-                                                if (typeof id !== 'string') return id;
-                                                if (id.startsWith('g')){
-                                                        const cl = memberToCluster && memberToCluster.get ? memberToCluster.get(id) : null;
-                                                        if (cl && (!expandedClusters || !expandedClusters.has || !expandedClusters.has(cl.id))) return cl.id;
-                                                }
-                                                return id;
-                                        }
-                                        source = redirect(source);
-                                        target = redirect(target);
-                                        acc.push({
-                                                id: `${source}->${target}#${kind}#${e.time_ms}`,
-                                                source, target, kind,
-                                                meta: { time_ms: e.time_ms, value: e.value, event: e.event, channel: e.channel, ch_ptr: e.ch_ptr, channel_key: e.channel_key, msg_id: e.msg_id, seq, src: (e.source || e.Source) }
-                                        });
-                                }
-
-                                let links = [];
-                                // Map attempt_id -> select_id and select summaries for HUD/labels
-                                const attemptToSelect = new Map();
-                                const selectSummary = new Map(); // sid -> { chosen:string|null, dropped:string[] }
-                                try {
-                                        for (const e of trace) {
-                                                if ((e.event === 'select_chosen' || e.event === 'select_dropped') && e.attempt_id) {
-                                                        const sid = e.select_id || '';
-                                                        attemptToSelect.set(e.attempt_id, sid);
-                                                        if (!selectSummary.has(sid)) selectSummary.set(sid, { chosen: null, dropped: [] });
-                                                        const sum = selectSummary.get(sid);
-                                                        if (e.event === 'select_chosen') sum.chosen = e.attempt_id;
-                                                        else sum.dropped.push(e.attempt_id);
-                                                }
-                                        }
-                                } catch {}
-                                // Prefer atomic attempt/commit path when present; otherwise fall back to legacy.
-                                const hasAtomic = !!trace.find(e => e && typeof e.event === 'string' && /^chan_/.test(e.event));
-                                const messageEdges = [];
-                                const msgSendMap = new Map();
-                                const seenMsgIDs = new Set();
-                                if (hasAtomic) {
-                                        const attemptEdges = new Map(); // attempt_id -> link obj
-                                        const chanSeq = new Map(); // channel -> seq counter
-                                        function nextSeq(ch){ const n=(chanSeq.get(ch)||0)+1; chanSeq.set(ch,n); return n; }
-                                const addEdge = (source, target, kind, e, flags) => {
-                                        const key = channelIdentityForEvent(e);
-                                        if (!key) return null;
-                                        const seq = nextSeq(key);
-                                        pushLink(links, source, target, kind, e, seq);
-                                                const L = links[links.length-1];
-                                                if (flags && flags.tentative) L.tentative = true;
-                                                if (flags && flags.commit) L.commit = true;
-                                                if (!L.meta) L.meta = {};
-                                                if (e.id) L.meta.attempt_id = e.id;
-                                                if (e.attempt_id) L.meta.attempt_id = e.attempt_id;
-                                                if (e.msg_id) L.meta.msg_id = e.msg_id;
-                                                if (e.id && flags && flags.commit) L.meta.commit_id = e.id;
-                                                if (e.peer_g) L.meta.peer_g = e.peer_g;
-                                                return L;
-                                        };
-                                        for (const e of trace) {
-                                                const ev = String(e.event||'');
-                                                if (!/^chan_/.test(ev)) continue;
-                                                const key = channelIdentityForEvent(e); if (!key) continue;
-                                                switch (ev) {
-                                                case 'chan_send_attempt': {
-                                                        const chId = channelNodeId(e);
-                                                        const L = addEdge(`g${e.g}`, chId, 'send', e, {tentative:true});
-                                                        if (e.id) attemptEdges.set(e.id, L);
-                                                        break;
-                                                }
-                                        case 'chan_send_commit': {
-                                                const key2 = e.attempt_id; let L = key2 ? attemptEdges.get(key2) : null;
-                                                if (L) { L.tentative = false; L.commit = true; if (!L.meta) L.meta={}; L.meta.commit_id = e.id; }
-                                                else {
-                                                        // Commit seen first (or attempt not recorded); create committed edge.
-                                                        const chId = channelNodeId(e);
-                                                        L = addEdge(`g${e.g}`, chId, 'send', e, {commit:true});
-                                                }
-                                                break;
-                                                }
-                                        case 'chan_recv_attempt': {
-                                                        const chId = channelNodeId(e);
-                                                        const L = addEdge(chId, `g${e.g}`, 'recv', e, {tentative:true});
-                                                        if (e.id) attemptEdges.set(e.id, L);
-                                                        break;
-                                                }
-                                        case 'chan_recv_commit': {
-                                                const key2 = e.attempt_id; let L = key2 ? attemptEdges.get(key2) : null;
-                                                if (L) { L.tentative = false; L.commit = true; if (!L.meta) L.meta={}; L.meta.commit_id = e.id; if (e.peer_g) L.meta.peer_g = e.peer_g; }
-                                                else {
-                                                        const chId = channelNodeId(e);
-                                                        L = addEdge(chId, `g${e.g}`, 'recv', e, {commit:true});
-                                                }
-                                                break;
-                                        }
-                                        case 'chan_send': {
-                                                if (e.msg_id) msgSendMap.set(e.msg_id, e.g);
-                                                break;
-                                        }
-                                        case 'chan_recv': {
-                                                if (e.msg_id && !seenMsgIDs.has(e.msg_id)) {
-                                                        const srcG = (typeof e.peer_g === 'number' && e.peer_g > 0) ? e.peer_g : msgSendMap.get(e.msg_id);
-                                                        if (srcG != null && e.g != null) {
-                                                                const src = `g${srcG}`;
-                                                                const tgt = `g${e.g}`;
-                                                                messageEdges.push({
-                                                                        id: `${src}->${tgt}#message#${e.msg_id}`,
-                                                                        source: src,
-                                                                        target: tgt,
-                                                                        kind: 'message',
-                                                                        meta: { msg_id: e.msg_id, channel: e.channel || e.channel_key }
-                                                                });
-                                                                seenMsgIDs.add(e.msg_id);
-                                                        }
-                                                }
-                                                break;
-                                        }
-                                        default:
-                                                break;
-                                        }
-                                        }
-                                } else {
-                                        const ops = trace.filter(e => e.channel);
-                                        const base = {};
-                                        const keyOf = (e) => channelIdentityForEvent(e) || e.channel;
-                                        for (const e of ops) {
-                                                const t = e.time_ms;
-                                                const key = keyOf(e);
-                                                if (!key) continue;
-                                                base[key] = base[key] === undefined ? t : Math.min(base[key], t);
-                                        }
-                                        ops.sort((a, b) => {
-                                                const ba = base[keyOf(a)], bb = base[keyOf(b)];
-                                                if (ba !== bb) return ba - bb;
-                                                if (a.channel === b.channel) {
-                                                        const isSendA = /(^|_)send($|_)/.test(a.event);
-                                                        const isSendB = /(^|_)send($|_)/.test(b.event);
-                                                        if (isSendA !== isSendB) return isSendA ? -1 : 1;
-                                                }
-                                                return a.time_ms - b.time_ms;
-                                        });
-                                        const drawnKeys = new Set();
-                                        ops.forEach((e, i) => {
-                                                const ev = e.event;
-                                                const seq = i + 1;
-                                                const isSend = /(^|_)send($|_)/.test(ev);
-                                                const isRecv = /(^|_)recv($|_)/.test(ev);
-                                                const role = isSend ? 'send' : (isRecv ? 'recv' : '');
-                                                if (!role) return;
-                                                const chKey = keyOf(e);
-                                                if (!chKey) return;
-                                                const key = `${role}:${e.g}:${chKey}`;
-                                                const isComplete = /complete/.test(ev);
-                                                if (isComplete && drawnKeys.has(key)) return;
-                                                const chId = `ch:${chKey}`;
-                                                if (!drawnKeys.has(key)) {
-                                                        if (isSend) pushLink(links, `g${e.g}`, chId, 'send', e, seq);
-                                                        else pushLink(links, chId, `g${e.g}`, 'recv', e, seq);
-                                                        drawnKeys.add(key);
-                                                }
-                                        });
-                                }
-
-                                // Add spawn edges from go_start to visualize parent→child when available (fallback to main as parent).
-                                try {
-                                        const mainNode = nodes.find(n => n.type==='goroutine' && (n.role||'').toLowerCase()==='main');
-                                        for (const e of trace) {
-                                                if (!e || e.event !== 'go_start') continue;
-                                                const child = `g${e.g}`;
-                                                const parent = (e.parent_g && e.parent_g>0) ? `g${e.parent_g}` : (mainNode ? mainNode.id : null);
-                                                if (!parent) continue;
-                                                links.push({ id: `${parent}->${child}#spawn#${e.time_ms}`, source: parent, target: child, kind: 'spawn', meta: { time_ms: e.time_ms, event: 'spawn' } });
-                                        }
-                                } catch {}
 
                                 // Light create links from main to channels (visual only).
                                 function findChannelIdByLabel(label) {
@@ -858,6 +674,7 @@
                                         .scaleExtent([0.25, 4])
                                         .on('zoom', (ev) => { root.attr('transform', ev.transform); try { renderLabels(ev.transform.k); } catch {} });
                                 svg.call(zoom).on('dblclick.zoom', null).on('click', () => clearSelection());
+                                renderLabels(lastZoomK);
 
                                 const defs = svg.append('defs');
                                 defs.append('marker').attr('id', 'arrow-send').attr('viewBox', '0 -5 10 10').attr('refX', 10).attr('refY', 0)
@@ -904,21 +721,43 @@
                                 };
                                 let showIDs = loadIDsPref();
                                 function computeEdgeLabel(d){
-                                        const val = d.meta.value !== undefined ? ` = ${d.meta.value}` : '';
-                                        const dprev = d.meta.delta != null ? `  Δprev=${fmtDelta(d.meta.delta)}` : '';
-                                        const dch = d.meta.chan_delta != null ? `  Δch=${fmtDelta(d.meta.chan_delta)}` : '';
-                                        const pair = d.meta.chan_pair != null ? ` (pair ${d.meta.chan_pair})` : '';
-                                        const ids = showIDs && (d.meta.attempt_id||d.meta.commit_id) ? ` id:${d.meta.attempt_id||''}${d.meta.commit_id?`→${d.meta.commit_id}`:''}` : '';
-                                        const sid = showIDs && d.meta && d.meta.attempt_id && attemptToSelect.get(d.meta.attempt_id) ? ` sid:${attemptToSelect.get(d.meta.attempt_id)}` : '';
-                                        const pairIdTxt = showIDs && d.meta && d.meta.pair_id ? ` p:${d.meta.pair_id}` : '';
-                                        const delt = (d.meta.delta_ms!=null) ? ` Δ=${fmtDelta(d.meta.delta_ms)}` : '';
-                                        const drop = (d.dropped ? ' dropped' : '');
-                                        return `#${d.meta.seq} ${d.meta.event}${val}${pair}${ids}${sid}${pairIdTxt}${delt}${drop}${dprev}${dch}  t=${d.meta.time_ms}ms`;
+                                        const meta = d.meta || {};
+                                        const eventName = String(meta.event || '');
+                                        let label = 'edge';
+                                        if (eventName.includes('send')) label = 'send';
+                                        else if (eventName.includes('recv')) label = 'recv';
+                                        else if (d.kind) label = d.kind;
+                                        const phase = eventName.includes('attempt') ? 'attempt' : eventName.includes('commit') ? 'commit' : '';
+                                        const value = meta.value !== undefined ? ` = ${meta.value}` : '';
+                                        let result = `${label}${phase ? ' ' + phase : ''}${value}`.trim();
+                                        if (!result) result = eventName || 'edge';
+                                        if (showIDs) {
+                                                const extras = [];
+                                                if (meta.attempt_id) extras.push(`id:${meta.attempt_id}`);
+                                                if (meta.commit_id) extras.push(`commit:${meta.commit_id}`);
+                                                if (meta.pair_id) extras.push(`p:${meta.pair_id}`);
+                                                if (meta.attempt_id && attemptToSelect.get(meta.attempt_id)) extras.push(`sid:${attemptToSelect.get(meta.attempt_id)}`);
+                                                if (extras.length) result += ` ${extras.join(' ')}`;
+                                        }
+                                        return result;
                                 }
                                 linkLabel = linkG.selectAll('.edge-label').data(links, d => d.id).join('text')
                                         .attr('class', d => `edge-label${d.meta && d.meta.src === 'synth' ? ' synth' : ''}`)
                                         .attr('text-anchor', 'middle')
                                         .text(computeEdgeLabel);
+
+                                function edgeTooltipHtml(d){
+                                        const meta = d.meta || {};
+                                        const dprev = meta.delta != null ? `<br>Δprev=${fmtDelta(meta.delta)}` : '';
+                                        const dch = meta.chan_delta != null ? `<br>Δch=${fmtDelta(meta.chan_delta)}` : '';
+                                        const pair = meta.chan_pair != null ? `<br>pair=${meta.chan_pair}` : '';
+                                        const ids = (meta.attempt_id||meta.commit_id) ? `<br>id=${meta.attempt_id||''}${meta.commit_id?`→${meta.commit_id}`:''}` : '';
+                                        const peer = meta.peer_g ? `<br>peer_g=g${meta.peer_g}` : '';
+                                        const sid = (meta.attempt_id && attemptToSelect.get(meta.attempt_id)) ? `<br>sid=${attemptToSelect.get(meta.attempt_id)}` : '';
+                                        const ptr = meta.ch_ptr ? `<br>ptr=${meta.ch_ptr}` : '';
+                                        const value = meta.value !== undefined ? `<br>value=${meta.value}` : '';
+                                        return `#${meta.seq || ''} ${meta.event || ''}${value}${ids}${peer}${sid}${pair}${ptr}<br>t=${meta.time_ms}ms${dprev}${dch}`;
+                                }
 
                                 // Bundling overlay — initialize; actual data computed after nodes/idMap exist
                                 function groupKeyOfNode(n){
@@ -1171,6 +1010,11 @@
                                         showTip(String(text).replaceAll('\n', '<br>'), ev.pageX, ev.pageY);
                                 }).on('mouseleave', hideTip);
 
+                                linkLabel.on('mouseenter', (ev, d) => {
+                                        if (d.kind === 'spawn') return;
+                                        showTip(edgeTooltipHtml(d), ev.pageX, ev.pageY);
+                                }).on('mouseleave', hideTip);
+
                                 link.on('click', (ev) => {
                                         ev.stopPropagation();
                                         clearSelection();
@@ -1205,26 +1049,12 @@
                                         }
                                 })
                                     .on('mouseenter', (ev, d) => {
-                                        const fmtDelta = (ms) => {
-                                                if (ms == null) return '';
-                                                const a = Math.abs(ms);
-                                                if (a < 1e-3) return `${(ms*1e6).toFixed(0)}ns`;
-                                                if (a < 1) return `${(ms*1e3).toFixed(0)}µs`;
-                                                return `${ms.toFixed(3)}ms`;
-                                        };
-                                        const dprev = d.meta.delta != null ? `<br>Δprev=${fmtDelta(d.meta.delta)}` : '';
-                                        const dch = d.meta.chan_delta != null ? `<br>Δch=${fmtDelta(d.meta.chan_delta)}` : '';
-                                        const pair = d.meta.chan_pair != null ? `<br>pair=${d.meta.chan_pair}` : '';
-                                        const ids = (d.meta.attempt_id||d.meta.commit_id) ? `<br>id=${d.meta.attempt_id||''}${d.meta.commit_id?`→${d.meta.commit_id}`:''}` : '';
-                                        const peer = (d.meta.peer_g ? `<br>peer_g=g${d.meta.peer_g}` : '');
-                                        const sid = (d.meta.attempt_id && attemptToSelect.get(d.meta.attempt_id)) ? `<br>sid=${attemptToSelect.get(d.meta.attempt_id)}` : '';
                                         if (d.kind === 'spawn') {
                                                 const sId = (typeof d.source === 'string') ? d.source : (d.source.id || '');
                                                 const tId = (typeof d.target === 'string') ? d.target : (d.target.id || '');
                                                 showTip(`spawn ${sId} → ${tId}<br>t=${d.meta.time_ms}ms`, ev.pageX, ev.pageY);
                                         } else {
-                                                const ptr = d.meta && d.meta.ch_ptr ? `<br>ptr=${d.meta.ch_ptr}` : '';
-                                                showTip(`#${d.meta.seq} ${d.meta.event}${d.meta.value !== undefined ? `<br>value=${d.meta.value}` : ''}${ids}${peer}${sid}${pair}${ptr}<br>t=${d.meta.time_ms}ms${dprev}${dch}`, ev.pageX, ev.pageY);
+                                                showTip(edgeTooltipHtml(d), ev.pageX, ev.pageY);
                                         }
                                 }).on('mouseleave', hideTip);
 
@@ -1301,9 +1131,10 @@
                         let pinOnDrop = false;
                         // Zoom-level label LOD (hide labels when zoomed out)
                         function renderLabels(k){
-                                const edgeLabelsOn = (k>=0.8);
-                                const mini = (k>=0.6 && k<0.8);
-                                d3.select('body').classed('hide-edge-labels', !(edgeLabelsOn || mini));
+                                lastZoomK = k;
+                                const showZoomLabels = k >= 0.6;
+                                const shouldShow = labelsEnabled && showZoomLabels;
+                                d3.select('body').classed('hide-edge-labels', !shouldShow);
                                 // LOD bundling: auto-show bundles when zoomed out sufficiently unless user enabled/disabled explicitly
                                 try {
                                         const on = (function(){ const el=document.getElementById('toggleBundle'); return el && el.checked; })();

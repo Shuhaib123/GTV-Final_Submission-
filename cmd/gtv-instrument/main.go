@@ -23,10 +23,11 @@ func main() {
 	ioRegions := flag.Bool("io-regions", false, "wrap common I/O (http/os/io) in regions")
 	ioJSON := flag.Bool("io-json", false, "wrap encoding/json calls in regions")
 	ioDB := flag.Bool("io-db", false, "wrap database/sql calls in regions")
-	level := flag.String("level", "regions_logs", "instrumentation level: tasks_only|regions|regions_logs")
+	level := flag.String("level", "regions", "instrumentation level: tasks_only|regions|regions_logs")
 	grpcTasks := flag.Bool("grpc-tasks", true, "add tasks to gRPC handlers (methods)")
 	httpTasks := flag.Bool("http-tasks", true, "add tasks to HTTP handlers")
 	loopRegions := flag.Bool("loop-regions", false, "wrap safe loop bodies in regions")
+	valueLogs := flag.Bool("value-logs", instrumenter.ValueLogsEnv(false), "emit trace.Log(ctx,\"value\",...) annotations when regions_logs enabled")
 	includePkgs := flag.String("include-pkgs", "", "comma or pipe separated package patterns to include (others downgraded to tasks_only)")
 	excludePkgs := flag.String("exclude-pkgs", "", "comma or pipe separated package patterns to exclude (downgraded to tasks_only)")
 	flag.Parse()
@@ -47,7 +48,7 @@ func main() {
 		}
 		return out
 	}
-	instrumenter.SetOptions(instrumenter.Options{GuardDynamicLabels: *guard, AddGoroutineRegions: *gorRegions, AddBlockRegions: *blockRegions, AddIORegions: *ioRegions, AddIOJSONRegions: *ioJSON, AddIODBRegions: *ioDB, AddGRPCTasks: *grpcTasks, AddHTTPHandlerTasks: *httpTasks, AddLoopRegions: *loopRegions, IncludePackages: split(*includePkgs), ExcludePackages: split(*excludePkgs), Level: *level})
+	instrumenter.SetOptions(instrumenter.Options{GuardDynamicLabels: *guard, AddGoroutineRegions: *gorRegions, AddBlockRegions: *blockRegions, AddIORegions: *ioRegions, AddIOJSONRegions: *ioJSON, AddIODBRegions: *ioDB, AddGRPCTasks: *grpcTasks, AddHTTPHandlerTasks: *httpTasks, AddLoopRegions: *loopRegions, AddValueLogs: *valueLogs, IncludePackages: split(*includePkgs), ExcludePackages: split(*excludePkgs), Level: *level})
 	src, err := ioutil.ReadFile(*in)
 	if err != nil {
 		log.Fatal(err)
@@ -58,7 +59,8 @@ func main() {
 	}
 	base := strings.ToLower(*name)
 	outPath := filepath.Join(*outDir, base+"_gen.go")
-	if err := ioutil.WriteFile(outPath, code, 0644); err != nil {
+	tag := []byte(fmt.Sprintf("//go:build workload_%s\n// +build workload_%s\n\n", base, base))
+	if err := ioutil.WriteFile(outPath, append(tag, code...), 0644); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("wrote", outPath)

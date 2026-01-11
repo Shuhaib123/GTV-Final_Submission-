@@ -40,11 +40,12 @@ func main(){
           <label class="mini">Goroutine regions <input type="checkbox" id="gorRegions" checked></label>
           <label class="mini">Level
             <select id="level">
-              <option value="regions_logs" selected>regions + logs</option>
-              <option value="regions">regions only</option>
+              <option value="regions" selected>regions only (default)</option>
+              <option value="regions_logs">regions + logs (more verbose)</option>
               <option value="tasks_only">tasks only</option>
             </select>
           </label>
+          <label class="mini">Value logs <input type="checkbox" id="valueLogs"></label>
           <label class="mini">Block regions <input type="checkbox" id="blockRegions"></label>
           <label class="mini">I/O regions <input type="checkbox" id="ioRegions"></label>
           <label class="mini">JSON <input type="checkbox" id="ioJSON"></label>
@@ -107,7 +108,8 @@ func main(){
       $('#name').value = LS.getStr('name', 'MyWork');
       $('#guard').checked = LS.getBool('guard', true);
       $('#gorRegions').checked = LS.getBool('gorRegions', true);
-      $('#level').value = LS.getStr('level', 'regions_logs');
+      $('#level').value = LS.getStr('level', 'regions');
+      $('#valueLogs').checked = LS.getBool('valueLogs', false);
       $('#blockRegions').checked = LS.getBool('blockRegions', false);
       $('#ioRegions').checked = LS.getBool('ioRegions', false);
       const ioJSON = $('#ioJSON'); if (ioJSON) ioJSON.checked = LS.getBool('ioJSON', false);
@@ -134,6 +136,7 @@ func main(){
       bind('#guard','bool');
       bind('#gorRegions','bool');
       bind('#level','str');
+      bind('#valueLogs','bool');
       bind('#blockRegions','bool');
       bind('#ioRegions','bool');
       if ($('#ioJSON')) bind('#ioJSON','bool');
@@ -162,7 +165,7 @@ func main(){
       // persist name on instrument
       LS.setStr('name', name);
       try{
-        const res = await fetch('/instrument', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code, workload_name: name, guard_labels: $('#guard').checked, goroutine_regions: $('#gorRegions').checked, level: $('#level').value, block_regions: $('#blockRegions').checked, io_regions: $('#ioRegions').checked, io_json: $('#ioJSON').checked, io_db: $('#ioDB').checked, io_http: ($('#ioHTTP')?$('#ioHTTP').checked:false), io_os: ($('#ioOS')?$('#ioOS').checked:false) }) });
+        const res = await fetch('/instrument', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code, workload_name: name, guard_labels: $('#guard').checked, goroutine_regions: $('#gorRegions').checked, level: $('#level').value, block_regions: $('#blockRegions').checked, io_regions: $('#ioRegions').checked, io_json: $('#ioJSON').checked, io_db: $('#ioDB').checked, io_http: ($('#ioHTTP')?$('#ioHTTP').checked:false), io_os: ($('#ioOS')?$('#ioOS').checked:false), value_logs: $('#valueLogs').checked }) });
         const j = await res.json();
         if (!res.ok) throw new Error(j && j.error || res.status);
         setStatus(`Workload '${j.workload}' created → ${j.file}`);

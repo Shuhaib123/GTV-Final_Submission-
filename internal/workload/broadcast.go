@@ -171,6 +171,11 @@ func (c *bcClient) runClient(ctx context.Context, serverJoin chan *bcRequest, go
 		case c.serverOut = <-c.join:
 			chName := fmt.Sprintf("join[%d]", c.id)
 			trace.WithRegion(ctx, "client: receive from "+chName, func() {})
+			if c.id == 1 && c.serverOut != nil && !sent {
+				TraceSend(ctx, "client: send to clientin", c.serverOut, "Hello World")
+				trace.Log(ctx, "client", "client 1 broadcasted Hello World")
+				sent = true
+			}
 		case msg := <-c.serverIn:
 			chName := fmt.Sprintf("clientout[%d]", c.id)
 			trace.WithRegion(ctx, "client: receive from "+chName, func() {
@@ -180,12 +185,6 @@ func (c *bcClient) runClient(ctx context.Context, serverJoin chan *bcRequest, go
 			})
 			trace.Log(ctx, "client", fmt.Sprintf("client %d received: %s", c.id, msg))
 			return
-		default:
-			if c.id == 1 && c.serverOut != nil && !sent {
-				TraceSend(ctx, "client: send to clientin", c.serverOut, "Hello World")
-				trace.Log(ctx, "client", "client 1 broadcasted Hello World")
-				sent = true
-			}
 		}
 	}
 }
