@@ -74,10 +74,6 @@ type TimelineEnvelope struct {
 	Warnings      []string        `json:"warnings,omitempty"`
 }
 
-type DedupAudit struct {
-	Duplicates int
-}
-
 // Options control live/offline behavior.
 type Options struct {
 	// If true, emit a synthetic *_send just before a *_recv when no prior send was observed.
@@ -1035,10 +1031,6 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 		if err := emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid}); err != nil {
 			return err
 		}
-
-		st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr, MsgID: mid})
-		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid})
-		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid})
 		st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr, MsgID: mid})
 	case "recv":
 		q := st.sendsByKey[st.opKey(key, chPtr)]
@@ -1231,6 +1223,22 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 	normalized := make([]TimelineEvent, len(events))
 	warnings := make([]string, 0)
 	for i, ev := range events {
+		if ev.ChannelKey != "" {
+			ev.ChannelKey = normalizeChannelKey(ev.ChannelKey)
+		}
+		if ev.ChPtr != "" {
+			ev.ChPtr = normalizePointer(ev.ChPtr)
+		}
+		if ev.ChannelKey == "" {
+			if key := normalizeChannelKey(ev.Channel); key != "" {
+				ev.ChannelKey = key
+			}
+		}
+		if ev.ChPtr == "" {
+			if key := normalizePointer(ev.ChannelKey); key != "" && isPointerString(key) {
+				ev.ChPtr = key
+			}
+		}
 		if ev.TimeNs == 0 {
 			ev.TimeNs = int64(ev.TimeMs*1e6 + 0.5)
 		}
@@ -1279,38 +1287,6 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 		Events:        normalized,
 		Warnings:      warnings,
 	}
-}
-
-// DedupTimeline removes exact duplicate parser emissions while preserving order.
-// Key: time_ns (or derived from time_ms) + g + channel + event + attempt_id.
-func DedupTimeline(in []TimelineEvent) ([]TimelineEvent, DedupAudit) {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]TimelineEvent, 0, len(in))
-	var audit DedupAudit
-	for _, ev := range in {
-		tns := ev.TimeNs
-		if tns == 0 {
-			tns = int64(ev.TimeMs*1e6 + 0.5)
-		}
-		att := ev.AttemptID
-		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
-			att = ev.ID
-		}
-		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
-		if _, ok := seen[key]; ok {
-			audit.Duplicates++
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, ev)
-	}
-	return out, audit
-}
-
-// AppendAuditSummary is a no-op placeholder for optional audit summary injection.
-func AppendAuditSummary(events []TimelineEvent, audit DedupAudit) []TimelineEvent {
-	_ = audit
-	return events
 }
 
 func timelineChannelIdentity(ev TimelineEvent) string {

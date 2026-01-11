@@ -230,7 +230,7 @@ func summarize(events []traceproc.TimelineEvent) summaryCounts {
 			channels[ch] = struct{}{}
 		}
 		if ev.Event == "chan_send" {
-			if ev.PeerG != 0 {
+			if ev.PeerG != 0 || ev.MsgID != 0 || ev.PairID != "" {
 				paired++
 			}
 			key := fmt.Sprintf("send:%d:%s", ev.G, channelIdentity(ev))
@@ -239,7 +239,7 @@ func summarize(events []traceproc.TimelineEvent) summaryCounts {
 			}
 		}
 		if ev.Event == "chan_recv" {
-			if ev.PeerG == 0 {
+			if ev.PeerG == 0 && ev.MsgID == 0 && ev.PairID == "" {
 				unmatched++
 			}
 			key := fmt.Sprintf("recv:%d:%s", ev.G, channelIdentity(ev))
