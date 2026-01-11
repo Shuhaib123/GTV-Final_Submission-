@@ -315,7 +315,9 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Println("runOnceHTTP: runner wait:", waitErr)
 	}
 	// Deduplicate exact duplicates and write atomically to avoid truncation.
-	timeline = dedupTimeline(timeline)
+	var audit traceproc.DedupAudit
+	timeline, audit = traceproc.DedupTimeline(timeline)
+	timeline = traceproc.AppendAuditSummary(timeline, audit)
 	payload := traceproc.NormalizeTimeline(timeline, st)
 	if limiter != nil && limiter.Limited() {
 		log.Printf("trace.out truncated to %d bytes (limit %d)", limiter.written, limiter.max)
@@ -340,31 +342,6 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
-
-// dedupTimeline removes exact duplicate parser emissions while preserving order.
-// Key: time_ns (or derived from time_ms) + g + channel + event + attempt_id
-func dedupTimeline(in []traceproc.TimelineEvent) []traceproc.TimelineEvent {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]traceproc.TimelineEvent, 0, len(in))
-	for _, ev := range in {
-		tns := ev.TimeNs
-		if tns == 0 {
-			// derive from ms if ns not present; 1ms = 1e6 ns
-			tns = int64(ev.TimeMs*1e6 + 0.5)
-		}
-		att := ev.AttemptID
-		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
-			att = ev.ID
-		}
-		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, ev)
-	}
-	return out
 }
 
 // writeJSONAtomic writes JSON to a temp file in the same directory and renames atomically.

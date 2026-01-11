@@ -63,6 +63,10 @@ type TimelineEnvelope struct {
 	Warnings      []string        `json:"warnings,omitempty"`
 }
 
+type DedupAudit struct {
+	Duplicates int
+}
+
 // Options control live/offline behavior.
 type Options struct {
 	// If true, emit a synthetic *_send just before a *_recv when no prior send was observed.
@@ -1198,6 +1202,38 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 		Events:        normalized,
 		Warnings:      warnings,
 	}
+}
+
+// DedupTimeline removes exact duplicate parser emissions while preserving order.
+// Key: time_ns (or derived from time_ms) + g + channel + event + attempt_id.
+func DedupTimeline(in []TimelineEvent) ([]TimelineEvent, DedupAudit) {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]TimelineEvent, 0, len(in))
+	var audit DedupAudit
+	for _, ev := range in {
+		tns := ev.TimeNs
+		if tns == 0 {
+			tns = int64(ev.TimeMs*1e6 + 0.5)
+		}
+		att := ev.AttemptID
+		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
+			att = ev.ID
+		}
+		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
+		if _, ok := seen[key]; ok {
+			audit.Duplicates++
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ev)
+	}
+	return out, audit
+}
+
+// AppendAuditSummary is a no-op placeholder for optional audit summary injection.
+func AppendAuditSummary(events []TimelineEvent, audit DedupAudit) []TimelineEvent {
+	_ = audit
+	return events
 }
 
 func timelineChannelIdentity(ev TimelineEvent) string {
