@@ -3,6 +3,7 @@ package traceproc
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -52,6 +53,18 @@ type TimelineEvent struct {
 	// Optional select fields
 	SelectID string `json:"select_id,omitempty"`
 	Dropped  bool   `json:"select_dropped,omitempty"`
+}
+
+const TimelineSchemaVersion = 1
+
+type TimelineEnvelope struct {
+	SchemaVersion int             `json:"schema_version"`
+	Events        []TimelineEvent `json:"events"`
+	Warnings      []string        `json:"warnings,omitempty"`
+}
+
+type DedupAudit struct {
+	Duplicates int
 }
 
 // Options control live/offline behavior.
@@ -324,6 +337,9 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 	emit = func(ev TimelineEvent) error {
 		if ev.TimeNs == 0 {
 			ev.TimeNs = tsNs
+		}
+		if ev.Seq == 0 {
+			ev.Seq = st.eventIndexByG[gid]
 		}
 		if ev.ChPtr != "" {
 			ev.MissingPtr = false
@@ -755,9 +771,6 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				} else if op, ok := st.Last[gid]; ok && op.kind == "send" {
 					ch = op.ch
 				}
-				if ch == "" && st.Opt.DropBlockNoCh {
-					return nil
-				}
 				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_send", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
 					return err
 				}
@@ -772,9 +785,6 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 					ch = op.ch
 				} else if op, ok := st.Last[gid]; ok && op.kind == "recv" {
 					ch = op.ch
-				}
-				if ch == "" && st.Opt.DropBlockNoCh {
-					return nil
 				}
 				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_receive", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
 					return err
@@ -971,6 +981,8 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 		st.nextMsgID++
 		st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr, MsgID: mid})
 		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid})
+		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid})
+		st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr, MsgID: mid})
 	case "recv":
 		q := st.sendsByKey[st.opKey(key, chPtr)]
 		if len(q) == 0 {
@@ -1008,13 +1020,15 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 				}
 			}
 			msgID := st.nextMsgID
+			mid := st.nextMsgID
 			st.nextMsgID++
 			if err := emit(TimelineEvent{TimeMs: t - 0.001, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, chPtr), G: sg, Role: st.Roles[sg], Source: "synth", ChPtr: chPtr}); err != nil {
 				return err
 			}
 			_ = emit(TimelineEvent{TimeMs: t - 0.001, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: sg, Role: st.Roles[sg], Source: "synth", PeerG: gid, MsgID: msgID})
+			_ = emit(TimelineEvent{TimeMs: t - 0.001, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: sg, Role: st.Roles[sg], Source: "paired", PeerG: gid, MsgID: mid})
 			// Also emit an unmatched recv with unknown peer for explicitness
-			_ = emit(TimelineEvent{TimeMs: t, Event: "chan_recv", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: 0})
+			_ = emit(TimelineEvent{TimeMs: t, Event: "chan_recv", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: sg, MsgID: mid})
 			return nil
 		}
 		// Match with the earliest recorded send
@@ -1026,6 +1040,7 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 		// Re-emit the matched send completion at its original time to ensure ordering (idempotent for UI)
 		_ = emit(TimelineEvent{TimeMs: sr.TimeMs, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, sr.Ptr), ChPtr: sr.Ptr, G: sr.G, Role: sr.Role, Source: "region"})
 		// Emit explicit recv with the pre-assigned message id
+
 		_ = emit(TimelineEvent{TimeMs: t, Event: "chan_recv", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: sr.G, MsgID: sr.MsgID})
 	}
 	return nil
@@ -1146,6 +1161,133 @@ func (st *ParseState) maybeEmitSelectFallback(gid int64, sid string, stack xtrac
 	}
 }
 
-func NormalizeTimeline(events []TimelineEvent, st *ParseState) []TimelineEvent {
+func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope {
+	_ = st
+	normalized := make([]TimelineEvent, len(events))
+	warnings := make([]string, 0)
+	for i, ev := range events {
+		if ev.TimeNs == 0 {
+			ev.TimeNs = int64(ev.TimeMs*1e6 + 0.5)
+		}
+		if ev.Seq == 0 {
+			ev.Seq = int64(i + 1)
+		}
+		name := strings.ToLower(ev.Event)
+		if isGoroutineEvent(name) && ev.G == 0 {
+			warnings = append(warnings, fmt.Sprintf("missing goroutine id for %s (seq=%d time_ns=%d)", ev.Event, ev.Seq, ev.TimeNs))
+		}
+		if isChannelEvent(name) {
+			if timelineChannelIdentity(ev) == "" {
+				unknown := fmt.Sprintf("unknown:%d:%d", ev.G, ev.Seq)
+				if ev.Channel == "" {
+					ev.Channel = unknown
+				}
+				if ev.ChannelKey == "" {
+					ev.ChannelKey = unknown
+				}
+				warnings = append(warnings, fmt.Sprintf("missing channel identity for %s (g=%d seq=%d time_ns=%d)", ev.Event, ev.G, ev.Seq, ev.TimeNs))
+			}
+		}
+		if isPairingEvent(name, ev.Source) {
+			if ev.PeerG == 0 && ev.PairID == "" && ev.MsgID == 0 {
+				warnings = append(warnings, fmt.Sprintf("missing pairing fields for %s (g=%d seq=%d time_ns=%d)", ev.Event, ev.G, ev.Seq, ev.TimeNs))
+			}
+		}
+		normalized[i] = ev
+	}
+	sort.SliceStable(normalized, func(i, j int) bool {
+		a := normalized[i]
+		b := normalized[j]
+		if a.TimeNs != b.TimeNs {
+			return a.TimeNs < b.TimeNs
+		}
+		if a.Seq != b.Seq {
+			return a.Seq < b.Seq
+		}
+		if a.G != b.G {
+			return a.G < b.G
+		}
+		return strings.ToLower(a.Event) < strings.ToLower(b.Event)
+	})
+	return TimelineEnvelope{
+		SchemaVersion: TimelineSchemaVersion,
+		Events:        normalized,
+		Warnings:      warnings,
+	}
+}
+
+// DedupTimeline removes exact duplicate parser emissions while preserving order.
+// Key: time_ns (or derived from time_ms) + g + channel + event + attempt_id.
+func DedupTimeline(in []TimelineEvent) ([]TimelineEvent, DedupAudit) {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]TimelineEvent, 0, len(in))
+	var audit DedupAudit
+	for _, ev := range in {
+		tns := ev.TimeNs
+		if tns == 0 {
+			tns = int64(ev.TimeMs*1e6 + 0.5)
+		}
+		att := ev.AttemptID
+		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
+			att = ev.ID
+		}
+		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
+		if _, ok := seen[key]; ok {
+			audit.Duplicates++
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ev)
+	}
+	return out, audit
+}
+
+// AppendAuditSummary is a no-op placeholder for optional audit summary injection.
+func AppendAuditSummary(events []TimelineEvent, audit DedupAudit) []TimelineEvent {
+	_ = audit
 	return events
+}
+
+func timelineChannelIdentity(ev TimelineEvent) string {
+	if ev.ChPtr != "" {
+		return ev.ChPtr
+	}
+	if ev.ChannelKey != "" {
+		return ev.ChannelKey
+	}
+	return ev.Channel
+}
+
+func isGoroutineEvent(name string) bool {
+	switch name {
+	case "goroutine_created", "goroutine_started", "go_start", "spawn", "worker_starting", "channels_created",
+		"blocked_send", "blocked_receive", "unblocked", "block", "unblock",
+		"select_begin", "select_case", "select_chosen", "select_dropped", "select_end":
+		return true
+	default:
+		return false
+	}
+}
+
+func isChannelEvent(name string) bool {
+	switch name {
+	case "chan_make", "chan_close", "chan_send", "chan_recv", "chan_depth",
+		"send_complete", "recv_attempt", "recv_complete",
+		"chan_send_attempt", "chan_recv_attempt", "chan_send_commit", "chan_recv_commit",
+		"blocked_send", "blocked_receive", "block", "unblock", "select_case":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPairingEvent(name, source string) bool {
+	switch name {
+	case "chan_send", "chan_recv":
+		return strings.ToLower(source) == "paired"
+	case "chan_send_commit", "chan_recv_commit":
+		return true
+	default:
+		return false
+	}
 }
