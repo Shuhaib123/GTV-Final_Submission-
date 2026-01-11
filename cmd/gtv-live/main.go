@@ -308,6 +308,12 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Append audit summary after offline parse so clients can inspect counters.
+	if err := traceproc.EmitAuditSummary(st, emit, "offline"); err != nil {
+		_ = cmd.Process.Kill()
+		writeJSONError(w, http.StatusInternalServerError, "audit summary: "+err.Error())
+		return
+	}
 	waitErr := cmd.Wait()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		log.Printf("runOnceHTTP: runner context aborted: %v", ctxErr)
@@ -906,6 +912,10 @@ func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, dro
 		ev, err := traceReader.ReadEvent()
 		if err != nil {
 			if err == io.EOF {
+				if err := traceproc.EmitAuditSummary(st, emitWithSeq, "live"); err != nil {
+					_ = cmd.Process.Kill()
+					return err
+				}
 				_ = cmd.Wait()
 				return nil
 			}

@@ -12,6 +12,17 @@ import (
 
 var skipPairingChannels map[string]bool
 
+const (
+	auditGoroutineLifecycleFiltered = "goroutine_lifecycle_filtered"
+	auditBlockedDropNoChannelSend   = "blocked_drop_no_channel_send"
+	auditBlockedDropNoChannelRecv   = "blocked_drop_no_channel_recv"
+	auditSynthSend                  = "synth_send"
+	auditRetroSendEmit              = "retro_send_emit"
+	auditUnmatchedRecv              = "unmatched_recv"
+	auditSkipPairingHardcoded       = "skip_pairing_hardcoded"
+	auditSkipPairingEnv             = "skip_pairing_env"
+)
+
 func init() {
 	if skip := strings.TrimSpace(os.Getenv("GTV_SKIP_PAIRING_CHANNELS")); skip != "" {
 		skipPairingChannels = make(map[string]bool)
@@ -88,6 +99,11 @@ type ParseState struct {
 	Active     map[int64]op
 	Last       map[int64]op
 
+	// Audit counters for parse decisions
+	auditCounts map[string]int64
+	lastTimeMs  float64
+	lastTimeNs  int64
+
 	// Synthesis bookkeeping
 	hasSend     map[skey]bool
 	lastMainG   int64
@@ -156,6 +172,7 @@ func NewParseState(opt Options) *ParseState {
 		Interested:       make(map[int64]struct{}),
 		Active:           make(map[int64]op),
 		Last:             make(map[int64]op),
+		auditCounts:      make(map[string]int64),
 		hasSend:          make(map[skey]bool),
 		Opt:              opt,
 		sendsByKey:       make(map[OpKey][]sendRecord),
@@ -190,6 +207,28 @@ func NewParseState(opt Options) *ParseState {
 		channelNameByPtr: make(map[string]string),
 		bufSends:         make(map[string]map[string]bool),
 	}
+}
+
+func (st *ParseState) incAudit(reason string) {
+	st.auditCounts[reason]++
+}
+
+func (st *ParseState) auditSummaryEvent(source string) TimelineEvent {
+	counts := make(map[string]int64, len(st.auditCounts))
+	for k, v := range st.auditCounts {
+		counts[k] = v
+	}
+	return TimelineEvent{
+		TimeMs: st.lastTimeMs,
+		TimeNs: st.lastTimeNs,
+		Event:  "audit_summary",
+		Source: source,
+		Value:  counts,
+	}
+}
+
+func EmitAuditSummary(st *ParseState, emit func(TimelineEvent) error, source string) error {
+	return emit(st.auditSummaryEvent(source))
 }
 
 func (st *ParseState) newID(prefix string) string {
@@ -331,6 +370,8 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 	tsMs := float64(e.Time()) / 1e6
 	tsNs := int64(e.Time())
 	gid := int64(e.Goroutine())
+	st.lastTimeMs = tsMs
+	st.lastTimeNs = tsNs
 	st.bumpEventIndex(gid)
 	// Ensure every emitted event carries a stable nanosecond timestamp for dedup.
 	baseEmit := emit
@@ -725,6 +766,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				}
 				return emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_created", G: gid, Func: fn, Role: st.Roles[gid], Source: "state"})
 			}
+			st.incAudit(auditGoroutineLifecycleFiltered)
 			return nil
 		}
 
@@ -755,6 +797,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				}
 				return nil
 			}
+			st.incAudit(auditGoroutineLifecycleFiltered)
 			return nil
 		}
 
@@ -771,6 +814,10 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				} else if op, ok := st.Last[gid]; ok && op.kind == "send" {
 					ch = op.ch
 				}
+				if ch == "" && st.Opt.DropBlockNoCh {
+					st.incAudit(auditBlockedDropNoChannelSend)
+					return nil
+				}
 				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_send", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
 					return err
 				}
@@ -785,6 +832,10 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 					ch = op.ch
 				} else if op, ok := st.Last[gid]; ok && op.kind == "recv" {
 					ch = op.ch
+				}
+				if ch == "" && st.Opt.DropBlockNoCh {
+					st.incAudit(auditBlockedDropNoChannelRecv)
+					return nil
 				}
 				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_receive", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
 					return err
@@ -917,6 +968,8 @@ func (st *ParseState) handleChanOp(ev, ch string, gid int64, role string, t floa
 			if err := emit(TimelineEvent{TimeMs: t - 0.001, Event: sendEv, Channel: ch, ChannelKey: st.channelKey(ck, ""), G: sg, Role: "worker", Source: "synth"}); err != nil {
 				return err
 			}
+			st.incAudit(auditSynthSend)
+			st.incAudit(auditRetroSendEmit)
 			st.hasSend[k] = true
 		}
 	}
@@ -990,10 +1043,12 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 	case "recv":
 		q := st.sendsByKey[st.opKey(key, chPtr)]
 		if len(q) == 0 {
+			st.incAudit(auditUnmatchedRecv)
 			// Prefer not to synthesize for broadcast channels we instrument at both ends.
 			// This avoids duplicate edges on join[i], clientin, clientout[i].
 			lname := key.Name
 			if lname == "clientin" || strings.HasPrefix(lname, "clientout") || strings.HasPrefix(lname, "join") {
+				st.incAudit(auditSkipPairingHardcoded)
 				return nil
 			}
 			if !st.Opt.SynthOnRecv {
@@ -1029,6 +1084,8 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 			if err := emit(TimelineEvent{TimeMs: t - 0.001, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, chPtr), G: sg, Role: st.Roles[sg], Source: "synth", ChPtr: chPtr}); err != nil {
 				return err
 			}
+			st.incAudit(auditSynthSend)
+			st.incAudit(auditRetroSendEmit)
 			_ = emit(TimelineEvent{TimeMs: t - 0.001, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: sg, Role: st.Roles[sg], Source: "synth", PeerG: gid, MsgID: msgID})
 			_ = emit(TimelineEvent{TimeMs: t - 0.001, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: sg, Role: st.Roles[sg], Source: "paired", PeerG: gid, MsgID: mid})
 			// Also emit an unmatched recv with unknown peer for explicitness
@@ -1039,8 +1096,11 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 		sr := q[0]
 		st.sendsByKey[st.opKey(key, chPtr)] = q[1:]
 		if shouldSkipPairing(key) {
+			st.incAudit(auditSkipPairingEnv)
 			return nil
 		}
+		// Re-emit the matched send at its original time to ensure ordering (idempotent for UI)
+		st.incAudit(auditRetroSendEmit)
 		// Emit explicit paired events with the logical message id assigned on send.
 		// Re-emit the matched send completion at its original time to ensure ordering (idempotent for UI)
 		_ = emit(TimelineEvent{TimeMs: sr.TimeMs, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, sr.Ptr), ChPtr: sr.Ptr, G: sr.G, Role: sr.Role, Source: "region"})
