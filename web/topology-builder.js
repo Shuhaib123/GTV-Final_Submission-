@@ -164,7 +164,10 @@
                         const info = topologyEventMeta(evt);
                         if (!info) continue;
                         if (typeof evt.g !== 'number') continue;
-                        const dedupKey = `${info.role}:${evt.g}:${info.identity}`;
+                        const msgId = evt?.msg_id ?? evt?.msgId ?? evt?.MsgID ?? '';
+                        const pairId = evt?.pair_id ?? evt?.pairID ?? evt?.PairID ?? '';
+                        const msgKey = msgId || pairId || '';
+                        const dedupKey = `${info.role}:${evt.g}:${info.identity}:${msgKey}`;
                         if (drawnKeys.has(dedupKey)) continue;
                         drawnKeys.add(dedupKey);
                         const chId = `ch:${info.identity}`;

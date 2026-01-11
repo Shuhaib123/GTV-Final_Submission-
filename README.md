@@ -59,6 +59,41 @@ Flags take precedence over env defaults.
 
 Port: edit `cmd/gtv-live/main.go` (ListenAndServe) to change `:8080`.
 
+## Configuration Reference (Env + Instrumenter)
+
+Live server env flags:
+- `GTV_ADDR` — listen address (fallback for `-addr`).
+- `GTV_SYNTH_SEND` — synthesize sends for unmatched recvs.
+- `GTV_DROP_BLOCK_NO_CH` — drop blocked events without channel identity.
+- `GTV_WORKLOAD` — workload name override for the live runner.
+- `GTV_BC_MODE` — broadcast mode selector (if supported by workload).
+- `GTV_LIVE_LOG` — enable verbose live logging.
+
+Trace processor env flags:
+- `GTV_SKIP_PAIRING_CHANNELS` — comma‑separated channel names to skip pairing.
+
+Instrumenter env flags (apply to `gtv-instrument` and the in-browser `/instrument` UI):
+- `GTV_INSTR_GUARD_LABELS`
+- `GTV_INSTR_GOROUTINE_REGIONS`
+- `GTV_INSTR_BLOCK_REGIONS`
+- `GTV_INSTR_HTTP_TASKS`
+- `GTV_INSTR_GRPC_TASKS`
+- `GTV_INSTR_LOOP_REGIONS`
+- `GTV_LOG_VALUES`
+- `GTV_INSTR_IO_REGIONS`
+- `GTV_INSTR_IO_JSON`
+- `GTV_INSTR_IO_DB`
+- `GTV_INSTR_IO_HTTP`
+- `GTV_INSTR_IO_OS`
+- `GTV_INSTR_IO_ASSUME_BG`
+- `GTV_INSTR_LEVEL`
+- `GTV_INSTR_CONFIG` — path to a JSON config file.
+
+Instrumenter JSON config keys (via `GTV_INSTR_CONFIG`):
+- `guard_labels`, `goroutine_regions`, `block_regions`, `http_tasks`, `grpc_tasks`, `loop_regions`
+- `io_regions` and `io` block (`encoding_json`, `database_sql`, `net_http`, `os_io`, `assume_background`)
+- `level`, `only`, `skip`, `include_packages`, `exclude_packages`
+
 
 ## Offline Mode
 
