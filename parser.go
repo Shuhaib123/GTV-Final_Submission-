@@ -47,6 +47,9 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 			return err
 		}
 	}
+	if err := traceproc.EmitAuditSummary(st, emit, "offline"); err != nil {
+		return err
+	}
 
 	// Sort by time for a consistent output
 	sort.Slice(timeline, func(i, j int) bool { return timeline[i].TimeMs < timeline[j].TimeMs })
