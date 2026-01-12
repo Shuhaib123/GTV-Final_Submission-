@@ -22,6 +22,7 @@ const (
 	auditUnmatchedRecv                          = "unmatched_recv"
 	auditSkipPairingHardcoded                   = "skip_pairing_hardcoded"
 	auditSkipPairingEnv                         = "skip_pairing_env"
+	auditUnparsedRegionOp                       = "unparsed_region_op"
 )
 
 func init() {
@@ -502,8 +503,31 @@ func parseRegionOp(typ string) (kind, ch string, ok bool) {
 			}
 		}
 	}
+	if strings.Contains(lt, "recv") {
+		if i := strings.LastIndex(lt, " from "); i >= 0 {
+			rest := strings.TrimSpace(lt[i+6:])
+			if rest != "" {
+				ch = strings.Fields(rest)[0]
+				return "recv", ch, true
+			}
+		}
+		if i := strings.LastIndex(lt, "recv "); i >= 0 {
+			rest := strings.TrimSpace(lt[i+5:])
+			if rest != "" {
+				ch = strings.Fields(rest)[0]
+				return "recv", ch, true
+			}
+		}
+	}
 	if strings.Contains(lt, "send") {
 		if i := strings.LastIndex(lt, " to "); i >= 0 {
+			rest := strings.TrimSpace(lt[i+4:])
+			if rest != "" {
+				ch = strings.Fields(rest)[0]
+				return "send", ch, true
+			}
+		}
+		if i := strings.LastIndex(lt, " on "); i >= 0 {
 			rest := strings.TrimSpace(lt[i+4:])
 			if rest != "" {
 				ch = strings.Fields(rest)[0]
@@ -538,6 +562,96 @@ func parseChNameMessage(msg string) (ptr, name string) {
 		}
 	}
 	return ptr, name
+}
+
+func (st *ParseState) handleRegionEnd(kind string, op op, gid int64, role string, tsMs float64, emit func(TimelineEvent) error) {
+	// Attach any stashed value to the completion event
+	val, hasVal := st.lastValue[gid]
+	if hasVal {
+		delete(st.lastValue, gid)
+	}
+	// Temporarily wrap emit to include value for legacy event
+	if hasVal {
+		origEmit := emit
+		emit = func(ev TimelineEvent) error { ev.Value = val; return origEmit(ev) }
+		_ = st.handleRegionOp(kind, op.ch, op.ptr, gid, role, tsMs, emit)
+		emit = func(ev TimelineEvent) error { return origEmit(ev) }
+	} else {
+		_ = st.handleRegionOp(kind, op.ch, op.ptr, gid, role, tsMs, emit)
+	}
+
+	// Atomic commit after legacy emission (pair via attempt queues)
+	if st.Opt.EmitAtomic {
+		att := st.attemptsByG[gid]
+		cid := st.newID("c")
+		cev := "chan_send_commit"
+		var peerG int64 = 0
+		ck := parseChKey(att.ch)
+		if kind == "recv" {
+			cev = "chan_recv_commit"
+			// Remove this recv attempt from its queue (front if present; else search)
+			ok := st.opKey(ck, att.ptr)
+			if q := st.rcvAttQ[ok]; len(q) > 0 {
+				if q[0] == att.id {
+					st.rcvAttQ[ok] = q[1:]
+				} else {
+					// linear remove
+					for i := range q {
+						if q[i] == att.id {
+							st.rcvAttQ[ok] = append(q[:i], q[i+1:]...)
+							break
+						}
+					}
+				}
+			}
+			// Pair with the oldest pending send attempt on this channel
+			pairID := att.id // default fallback to own recv attempt id
+			sendOpKey := st.opKey(ck, att.ptr)
+			if q := st.sndAttQ[sendOpKey]; len(q) > 0 {
+				sid := q[0]
+				st.sndAttQ[sendOpKey] = q[1:]
+				if ai, ok := st.attByID[sid]; ok {
+					peerG = ai.G
+				}
+				if sid != "" {
+					pairID = sid
+				}
+			}
+			chPtr := att.ptr
+			_ = emit(TimelineEvent{TimeMs: tsMs, Event: cev, ID: cid, AttemptID: att.id, G: gid, Channel: att.ch, ChannelKey: st.channelKey(ck, chPtr), ChPtr: chPtr, MissingPtr: chPtr == "", PeerG: peerG, PairID: pairID, DeltaMs: tsMs - att.time, Role: role, Source: "region"})
+			// Buffered depth accounting: if the paired send attempt had been buffered, depth--
+			if chPtr != "" && st.capByPtr[chPtr] > 0 {
+				if st.bufSends[chPtr] != nil && st.bufSends[chPtr][pairID] {
+					if st.depthByPtr[chPtr] > 0 {
+						st.depthByPtr[chPtr]--
+					}
+					delete(st.bufSends[chPtr], pairID)
+					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_depth", G: gid, Channel: att.ch, ChannelKey: chPtr, ChPtr: chPtr, Cap: st.capByPtr[chPtr], Value: st.depthByPtr[chPtr], Source: "region"})
+				}
+			}
+		} else {
+			// send commit: leave the send attempt queued; receiver will pair later
+			cev = "chan_send_commit"
+			// For send, use the send attempt id as the pair id; receiver will reuse it.
+			chPtr := att.ptr
+			_ = emit(TimelineEvent{TimeMs: tsMs, Event: cev, ID: cid, AttemptID: att.id, G: gid, Channel: att.ch, ChannelKey: st.channelKey(ck, chPtr), ChPtr: chPtr, MissingPtr: chPtr == "", PairID: att.id, DeltaMs: tsMs - att.time, Role: role, Source: "region"})
+			// Buffered depth accounting: if channel is buffered, increment and mark this attempt as buffered
+			if chPtr != "" && st.capByPtr[chPtr] > 0 {
+				if st.bufSends[chPtr] == nil {
+					st.bufSends[chPtr] = make(map[string]bool)
+				}
+				st.bufSends[chPtr][att.id] = true
+				st.depthByPtr[chPtr]++
+				if st.depthByPtr[chPtr] > st.capByPtr[chPtr] {
+					st.depthByPtr[chPtr] = st.capByPtr[chPtr]
+				}
+				_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_depth", G: gid, Channel: att.ch, ChannelKey: chPtr, ChPtr: chPtr, Cap: st.capByPtr[chPtr], Value: st.depthByPtr[chPtr], Source: "region"})
+			}
+		}
+		delete(st.activeAttempt, gid)
+		delete(st.attemptsByG, gid)
+	}
+	delete(st.Active, gid)
 }
 
 // ProcessEvent translates a trace Event into zero or more TimelineEvents via emit.
@@ -797,6 +911,8 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 		gid := int64(e.Goroutine())
 		if kind, ch, ok := parseRegionOp(rgn.Type); ok {
 			_ = st.handleRegionBegin(kind, ch, gid, st.Roles[gid], tsMs, emit)
+		} else {
+			st.incAudit(auditUnparsedRegionOp)
 		}
 
 	case xtrace.EventRegionEnd:
@@ -804,93 +920,21 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 		gid := int64(e.Goroutine())
 		if op, ok := st.Active[gid]; ok {
 			if kind, _, ok2 := parseRegionOp(rgn.Type); ok2 && kind == op.kind {
-				// Attach any stashed value to the completion event
-				val, hasVal := st.lastValue[gid]
-				if hasVal {
-					delete(st.lastValue, gid)
-				}
-				// Temporarily wrap emit to include value for legacy event
-				if hasVal {
-					origEmit := emit
-					emit = func(ev TimelineEvent) error { ev.Value = val; return origEmit(ev) }
-					_ = st.handleRegionOp(kind, op.ch, op.ptr, gid, st.Roles[gid], tsMs, emit)
-					emit = func(ev TimelineEvent) error { return origEmit(ev) }
-				} else {
-					_ = st.handleRegionOp(kind, op.ch, op.ptr, gid, st.Roles[gid], tsMs, emit)
-				}
-
-				// Atomic commit after legacy emission (pair via attempt queues)
+				st.handleRegionEnd(kind, op, gid, st.Roles[gid], tsMs, emit)
+			} else {
+				st.incAudit(auditUnparsedRegionOp)
 				if st.Opt.EmitAtomic {
-					att := st.attemptsByG[gid]
-					cid := st.newID("c")
-					cev := "chan_send_commit"
-					var peerG int64 = 0
-					ck := parseChKey(att.ch)
-					if kind == "recv" {
-						cev = "chan_recv_commit"
-						// Remove this recv attempt from its queue (front if present; else search)
-						ok := st.opKey(ck, att.ptr)
-						if q := st.rcvAttQ[ok]; len(q) > 0 {
-							if q[0] == att.id {
-								st.rcvAttQ[ok] = q[1:]
-							} else {
-								// linear remove
-								for i := range q {
-									if q[i] == att.id {
-										st.rcvAttQ[ok] = append(q[:i], q[i+1:]...)
-										break
-									}
-								}
-							}
+					if att, ok := st.attemptsByG[gid]; ok {
+						fallback := op
+						if fallback.ch == "" {
+							fallback.ch = att.ch
 						}
-						// Pair with the oldest pending send attempt on this channel
-						pairID := att.id // default fallback to own recv attempt id
-						sendOpKey := st.opKey(ck, att.ptr)
-						if q := st.sndAttQ[sendOpKey]; len(q) > 0 {
-							sid := q[0]
-							st.sndAttQ[sendOpKey] = q[1:]
-							if ai, ok := st.attByID[sid]; ok {
-								peerG = ai.G
-							}
-							if sid != "" {
-								pairID = sid
-							}
+						if fallback.ptr == "" {
+							fallback.ptr = att.ptr
 						}
-						chPtr := att.ptr
-						_ = emit(TimelineEvent{TimeMs: tsMs, Event: cev, ID: cid, AttemptID: att.id, G: gid, Channel: att.ch, ChannelKey: st.channelKey(ck, chPtr), ChPtr: chPtr, MissingPtr: chPtr == "", PeerG: peerG, PairID: pairID, DeltaMs: tsMs - att.time, Role: st.Roles[gid], Source: "region"})
-						// Buffered depth accounting: if the paired send attempt had been buffered, depth--
-						if chPtr != "" && st.capByPtr[chPtr] > 0 {
-							if st.bufSends[chPtr] != nil && st.bufSends[chPtr][pairID] {
-								if st.depthByPtr[chPtr] > 0 {
-									st.depthByPtr[chPtr]--
-								}
-								delete(st.bufSends[chPtr], pairID)
-								_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_depth", G: gid, Channel: att.ch, ChannelKey: chPtr, ChPtr: chPtr, Cap: st.capByPtr[chPtr], Value: st.depthByPtr[chPtr], Source: "region"})
-							}
-						}
-					} else {
-						// send commit: leave the send attempt queued; receiver will pair later
-						cev = "chan_send_commit"
-						// For send, use the send attempt id as the pair id; receiver will reuse it.
-						chPtr := att.ptr
-						_ = emit(TimelineEvent{TimeMs: tsMs, Event: cev, ID: cid, AttemptID: att.id, G: gid, Channel: att.ch, ChannelKey: st.channelKey(ck, chPtr), ChPtr: chPtr, MissingPtr: chPtr == "", PairID: att.id, DeltaMs: tsMs - att.time, Role: st.Roles[gid], Source: "region"})
-						// Buffered depth accounting: if channel is buffered, increment and mark this attempt as buffered
-						if chPtr != "" && st.capByPtr[chPtr] > 0 {
-							if st.bufSends[chPtr] == nil {
-								st.bufSends[chPtr] = make(map[string]bool)
-							}
-							st.bufSends[chPtr][att.id] = true
-							st.depthByPtr[chPtr]++
-							if st.depthByPtr[chPtr] > st.capByPtr[chPtr] {
-								st.depthByPtr[chPtr] = st.capByPtr[chPtr]
-							}
-							_ = emit(TimelineEvent{TimeMs: tsMs, Event: "chan_depth", G: gid, Channel: att.ch, ChannelKey: chPtr, ChPtr: chPtr, Cap: st.capByPtr[chPtr], Value: st.depthByPtr[chPtr], Source: "region"})
-						}
+						st.handleRegionEnd(att.kind, fallback, gid, st.Roles[gid], tsMs, emit)
 					}
-					delete(st.activeAttempt, gid)
-					delete(st.attemptsByG, gid)
 				}
-				delete(st.Active, gid)
 			}
 		}
 
