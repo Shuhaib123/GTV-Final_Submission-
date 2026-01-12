@@ -43,6 +43,8 @@ GTV is a tiny experiment to visualize Go concurrency from runtime traces. It sup
      - `-addr string` (default `:8080`) — HTTP listen address
      - `-synth` — enable send synthesis (same as `GTV_SYNTH_SEND=1`)
      - `-drop-block-no-ch` — drop unlabeled blocked events (same as `GTV_DROP_BLOCK_NO_CH=1`)
+     - `-atomic` — emit atomic attempt/commit events (disabled by default)
+     - `-mvp` — force MVP defaults (disable IO regions, loop regions, HTTP/GRPC tasks, value logs)
 3. Open the UI:
    - `http://localhost:8080/` → choose “Live Visualizer” (or open `http://localhost:8080/graph-live.html` directly)
 4. The page auto-connects to `/trace` and auto-starts a run; use the “Re-run” button for another run without reloading.
@@ -50,6 +52,8 @@ GTV is a tiny experiment to visualize Go concurrency from runtime traces. It sup
 Environment options:
 - `GTV_SYNTH_SEND=1` — synthesize a send just before any unmatched recv to keep edges complete.
 - `GTV_DROP_BLOCK_NO_CH=1` — drop blocked events that cannot be tied to a channel.
+- `GTV_FILTER_GOROUTINES=legacy` — keep legacy goroutine filtering (only `main.main` + `/workload.`).
+- `GTV_MVP=1` — force MVP defaults (disable IO regions, loop regions, HTTP/GRPC tasks, value logs).
 
 Examples:
 - Flags: `go run ./cmd/gtv-live -addr :9090 -synth -drop-block-no-ch`
@@ -58,6 +62,44 @@ Examples:
 Flags take precedence over env defaults.
 
 Port: edit `cmd/gtv-live/main.go` (ListenAndServe) to change `:8080`.
+
+## Configuration Reference (Env + Instrumenter)
+
+Live server env flags:
+- `GTV_ADDR` — listen address (fallback for `-addr`).
+- `GTV_SYNTH_SEND` — synthesize sends for unmatched recvs.
+- `GTV_DROP_BLOCK_NO_CH` — drop blocked events without channel identity.
+- `GTV_WORKLOAD` — workload name override for the live runner.
+- `GTV_BC_MODE` — broadcast mode selector (if supported by workload).
+- `GTV_LIVE_LOG` — enable verbose live logging.
+- `GTV_MVP` — force MVP defaults (disable IO regions, loop regions, HTTP/GRPC tasks, value logs).
+
+Trace processor env flags:
+- `GTV_SKIP_PAIRING_CHANNELS` — comma‑separated channel names to skip pairing.
+- `GTV_FILTER_GOROUTINES` — goroutine filter mode: `ops` (default, include `main.main` + goroutines with channel ops), `all` (include everything; unknown roles get `unknown`), or `legacy` (only `main.main` + `/workload.`).
+
+Instrumenter env flags (apply to `gtv-instrument` and the in-browser `/instrument` UI):
+- `GTV_INSTR_GUARD_LABELS`
+- `GTV_INSTR_GOROUTINE_REGIONS`
+- `GTV_INSTR_BLOCK_REGIONS`
+- `GTV_INSTR_HTTP_TASKS`
+- `GTV_INSTR_GRPC_TASKS`
+- `GTV_INSTR_LOOP_REGIONS`
+- `GTV_LOG_VALUES`
+- `GTV_INSTR_IO_REGIONS`
+- `GTV_INSTR_IO_JSON`
+- `GTV_INSTR_IO_DB`
+- `GTV_INSTR_IO_HTTP`
+- `GTV_INSTR_IO_OS`
+- `GTV_INSTR_IO_ASSUME_BG`
+- `GTV_INSTR_LEVEL`
+- `GTV_INSTR_CONFIG` — path to a JSON config file.
+- `GTV_MVP` — force MVP defaults (disable IO regions, loop regions, HTTP/GRPC tasks, value logs).
+
+Instrumenter JSON config keys (via `GTV_INSTR_CONFIG`):
+- `guard_labels`, `goroutine_regions`, `block_regions`, `http_tasks`, `grpc_tasks`, `loop_regions`
+- `io_regions` and `io` block (`encoding_json`, `database_sql`, `net_http`, `os_io`, `assume_background`)
+- `level`, `only`, `skip`, `include_packages`, `exclude_packages`
 
 
 ## Offline Mode
@@ -71,6 +113,20 @@ Port: edit `cmd/gtv-live/main.go` (ListenAndServe) to change `:8080`.
 
 Notes:
 - Offline parsing uses the same event processor as live; you can enable `GTV_SYNTH_SEND=1` during `go run .` to synthesize missing sends in JSON too.
+- MVP rule (channel pairing strategy A): emit `chan_send` only at send completion time (no retroactive emission), assign a `MsgID` on send and propagate it to the matched recv, and optionally emit a lightweight `pair` event at recv time.
+
+## Non-terminating programs
+
+Instrumented binaries install signal/time-based flushing hooks by default. This lets
+you get a valid `trace.json` even if the program never exits on its own.
+
+- Ctrl+C (SIGINT) or SIGTERM triggers a stop + flush.
+- Runner timeout: `--timeout 500ms` (or any Go duration) stops and flushes.
+- Advanced: set `GTV_TIMEOUT_MS=500` (milliseconds) for direct runs without the runner.
+
+Examples:
+- `go run ./cmd/gtv-runner -workload broadcast -timeout 2s`
+- `GTV_TIMEOUT_MS=750 go run .`
 
 
 ## Non-Terminating Programs
@@ -95,6 +151,28 @@ Environment override (advanced):
 - Live server wraps the workload with `runtime/trace` and streams events from `x/exp/trace.Reader` over WebSocket as `TimelineEvent` JSON.
 - `internal/traceproc.ProcessEvent` maps `x/exp/trace.Event` → `TimelineEvent` while tracking roles, blocking, and channel intent.
 - The front-end animates edges, blocks, and message flow as events advance.
+
+## Architecture Diagram
+
+```mermaid
+flowchart LR
+  A[runtime/trace] --> B[x/exp/trace.Reader]
+  B --> C[traceproc.ProcessEvent]
+  C --> D[handleRegionOp (pairing)]
+  D -->|emit chan_recv| E[TimelineEvent: chan_recv]
+  D -->|recv end can emit chan_send<br/>with earlier time_ns| F[TimelineEvent: chan_send]
+  C --> G[TimelineEvent stream]
+  G --> H[cmd/gtv-live assigns seq]
+  H --> I[WebSocket /trace]
+  I --> J[web/graph-live.html]
+```
+
+> **Warning**: Live stream is arrival‑ordered; retroactive timestamps can invert send/recv order.
+
+## Ordering Contract
+
+- `time_ns` is the authoritative timestamp; it originates in the trace reader and is preserved through processing.
+- `seq` is the authoritative arrival/order index for the live stream; it is assigned in `cmd/gtv-live` when events are emitted over WebSocket.
 
 
 ## Troubleshooting

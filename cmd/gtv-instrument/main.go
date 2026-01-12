@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -16,6 +16,8 @@ func main() {
 	in := flag.String("in", "", "input Go file (main program)")
 	name := flag.String("name", "Demo", "workload name (e.g., MyProg)")
 	outDir := flag.String("outdir", "internal/workload", "output directory for generated workload file")
+	mvpDefault := envBool("GTV_MVP")
+	mvp := flag.Bool("mvp", mvpDefault, "force MVP defaults (disable IO/loop/HTTP/GRPC/value logs)")
 	// Instrumenter options
 	guard := flag.Bool("guard-labels", true, "guard dynamic labels with trace.IsEnabled")
 	gorRegions := flag.Bool("goroutine-regions", false, "add goroutine:<name> regions at go sites")
@@ -24,8 +26,8 @@ func main() {
 	ioJSON := flag.Bool("io-json", false, "wrap encoding/json calls in regions")
 	ioDB := flag.Bool("io-db", false, "wrap database/sql calls in regions")
 	level := flag.String("level", "regions", "instrumentation level: tasks_only|regions|regions_logs")
-	grpcTasks := flag.Bool("grpc-tasks", true, "add tasks to gRPC handlers (methods)")
-	httpTasks := flag.Bool("http-tasks", true, "add tasks to HTTP handlers")
+	grpcTasks := flag.Bool("grpc-tasks", false, "add tasks to gRPC handlers (methods)")
+	httpTasks := flag.Bool("http-tasks", false, "add tasks to HTTP handlers")
 	loopRegions := flag.Bool("loop-regions", false, "wrap safe loop bodies in regions")
 	valueLogs := flag.Bool("value-logs", instrumenter.ValueLogsEnv(false), "emit trace.Log(ctx,\"value\",...) annotations when regions_logs enabled")
 	includePkgs := flag.String("include-pkgs", "", "comma or pipe separated package patterns to include (others downgraded to tasks_only)")
@@ -33,6 +35,9 @@ func main() {
 	flag.Parse()
 	if *in == "" {
 		log.Fatal("-in is required")
+	}
+	if *mvp {
+		_ = os.Setenv("GTV_MVP", "1")
 	}
 	split := func(s string) []string {
 		if s == "" {
@@ -65,4 +70,9 @@ func main() {
 	}
 	fmt.Println("wrote", outPath)
 	fmt.Println("You can now run: -workload=", strings.ToLower(*name))
+}
+
+func envBool(name string) bool {
+	v := os.Getenv(name)
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 }

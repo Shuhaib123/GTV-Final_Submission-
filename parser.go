@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,7 +29,11 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 	}
 
 	// Use shared processor without live synthesis; allow DropBlockNoCh via env.
-	opts := traceproc.Options{SynthOnRecv: false, DropBlockNoCh: os.Getenv("GTV_DROP_BLOCK_NO_CH") == "1"}
+	opts := traceproc.Options{
+		SynthOnRecv:     false,
+		DropBlockNoCh:   os.Getenv("GTV_DROP_BLOCK_NO_CH") == "1",
+		GoroutineFilter: traceproc.ParseGoroutineFilterMode(os.Getenv("GTV_FILTER_GOROUTINES")),
+	}
 	st := traceproc.NewParseState(opts)
 	var timeline []traceproc.TimelineEvent
 	emit := func(ev traceproc.TimelineEvent) error { timeline = append(timeline, ev); return nil }
@@ -46,6 +49,9 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 		if err := traceproc.ProcessEvent(&e, st, emit); err != nil {
 			return err
 		}
+	}
+	if err := traceproc.EmitAuditSummary(st, emit, "offline"); err != nil {
+		return err
 	}
 
 	// Sort by time for a consistent output
@@ -107,36 +113,15 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 	}
 
 	// Deduplicate exact duplicates for stability
-	timeline = dedupTimeline(timeline)
-	if err := writeJSONAtomic(jsonPath, timeline); err != nil {
+	var audit traceproc.DedupAudit
+	timeline, audit = traceproc.DedupTimeline(timeline)
+	timeline = traceproc.AppendAuditSummary(timeline, audit)
+	payload := traceproc.NormalizeTimeline(timeline, st)
+	if err := writeJSONAtomic(jsonPath, payload); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-// dedupTimeline removes exact duplicate parser emissions while preserving order.
-// Key: time_ns (or derived from time_ms) + g + channel + event + attempt_id
-func dedupTimeline(in []traceproc.TimelineEvent) []traceproc.TimelineEvent {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]traceproc.TimelineEvent, 0, len(in))
-	for _, ev := range in {
-		tns := ev.TimeNs
-		if tns == 0 {
-			tns = int64(ev.TimeMs*1e6 + 0.5)
-		}
-		att := ev.AttemptID
-		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
-			att = ev.ID
-		}
-		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, ev.Channel, ev.Event, att)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, ev)
-	}
-	return out
 }
 
 // writeJSONAtomic writes JSON to a temp file then renames atomically to avoid truncation.

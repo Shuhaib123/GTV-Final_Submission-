@@ -15,6 +15,7 @@
 .edge.recv { stroke:var(--edge-recv) }
 .edge.spawn { stroke: var(--main); stroke-dasharray: 3 3; opacity: .8 }
 .edge.tentative { stroke-dasharray:3 3; opacity:.85 }
+.edge.partial { stroke-dasharray:6 4; opacity:.85 }
 .edge.commit { stroke:#7dd97a; stroke-width:2.5 }
 .edge.synth { stroke:#9aa4b1; stroke-dasharray:4 3; opacity:.85 }
 .edge.dropped { stroke:#8a93a6; stroke-dasharray:2 4; opacity:.6 }
@@ -34,7 +35,10 @@
 .legend-area { position:absolute; left:14px; top:14px; display:flex; flex-direction:column; gap:8px; align-items:flex-start; }
 .legend { background:#11162a; border:1px solid #223; padding:10px 12px; border-radius:8px; display:flex; flex-direction:column; gap:6px; }
 .legend .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; vertical-align:-1px; border-radius:2px }
+.legend .swatch.partial { background:transparent; border:2px dashed var(--muted); }
+.legend-note { font-size:12px; color:var(--muted); display:flex; align-items:center; }
 .notes-area { position:relative; }
+.warnings-area { position:relative; }
 .notes-button { background:#11162a; border:1px solid #223; color:var(--fg); padding:6px 10px; border-radius:6px; cursor:pointer; font:14px/1.4 inherit; }
 .notes-button span { margin-left:6px; }
 .notes-button.active { border-color:#5b9dff; }
@@ -45,6 +49,11 @@
 .note-time { font-size:12px; color:#8fb1ff; margin-bottom:4px; display:block; }
 .note-text { font-size:12px; color:#d5d8e8; white-space:pre-wrap; line-height:1.3; }
 .notes-panel-empty { font-size:12px; color:#a6b0c8; }
+.warnings-panel { position:absolute; top:calc(100% + 6px); left:0; display:none; width:320px; max-height:320px; overflow:auto; background:#1a1316; border:1px solid #3a1f2a; border-radius:10px; padding:10px; box-shadow:0 10px 24px rgba(33,6,13,0.6); z-index:20; }
+.warnings-panel.open { display:block; }
+.warnings-panel .warning-row { padding:6px 0; border-bottom:1px solid #36212a; font-size:12px; color:#f2b6be; }
+.warnings-panel .warning-row:last-child { border-bottom:none; }
+.warnings-panel-empty { font-size:12px; color:#c9a5ad; }
 .note { display:none }
 .tooltip { position:absolute; pointer-events:none; background:#0c1022; border:1px solid #2a345f; padding:6px 8px; border-radius:6px; color:var(--fg); font-size:12px; white-space:pre }
 .hint { position:absolute; right:14px; bottom:14px; opacity:.8; background:#11162a; padding:6px 8px; border:1px solid #223; border-radius:8px }
