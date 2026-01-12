@@ -13,14 +13,15 @@ import (
 var skipPairingChannels map[string]bool
 
 const (
-	auditGoroutineLifecycleFiltered = "goroutine_lifecycle_filtered"
-	auditBlockedDropNoChannelSend   = "blocked_drop_no_channel_send"
-	auditBlockedDropNoChannelRecv   = "blocked_drop_no_channel_recv"
-	auditSynthSend                  = "synth_send"
-	auditRetroSendEmit              = "retro_send_emit"
-	auditUnmatchedRecv              = "unmatched_recv"
-	auditSkipPairingHardcoded       = "skip_pairing_hardcoded"
-	auditSkipPairingEnv             = "skip_pairing_env"
+	auditGoroutineLifecycleFilteredByName       = "goroutine_lifecycle_filtered_by_name"
+	auditGoroutineLifecycleFilteredByMissingOps = "goroutine_lifecycle_filtered_by_missing_ops"
+	auditBlockedDropNoChannelSend               = "blocked_drop_no_channel_send"
+	auditBlockedDropNoChannelRecv               = "blocked_drop_no_channel_recv"
+	auditSynthSend                              = "synth_send"
+	auditRetroSendEmit                          = "retro_send_emit"
+	auditUnmatchedRecv                          = "unmatched_recv"
+	auditSkipPairingHardcoded                   = "skip_pairing_hardcoded"
+	auditSkipPairingEnv                         = "skip_pairing_env"
 )
 
 func init() {
@@ -82,6 +83,29 @@ type Options struct {
 	DropBlockNoCh bool
 	// If true, emit atomic attempt/commit and block/unblock events in addition to legacy events.
 	EmitAtomic bool
+	// GoroutineFilter controls which goroutines are tracked.
+	GoroutineFilter GoroutineFilterMode
+}
+
+type GoroutineFilterMode int
+
+const (
+	GoroutineFilterOps GoroutineFilterMode = iota
+	GoroutineFilterAll
+	GoroutineFilterLegacy
+)
+
+func ParseGoroutineFilterMode(value string) GoroutineFilterMode {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "legacy", "true", "yes", "on":
+		return GoroutineFilterLegacy
+	case "all":
+		return GoroutineFilterAll
+	case "ops", "", "0", "false", "no", "off":
+		return GoroutineFilterOps
+	default:
+		return GoroutineFilterOps
+	}
 }
 
 // ParseState holds per-connection parsing state.
@@ -94,6 +118,9 @@ type ParseState struct {
 	Interested map[int64]struct{}
 	Active     map[int64]op
 	Last       map[int64]op
+
+	pendingGoroutines        map[int64]pendingGoroutine
+	pendingGoroutinesAudited bool
 
 	// Audit counters for parse decisions
 	auditCounts map[string]int64
@@ -161,24 +188,33 @@ type ParseState struct {
 	nextMsgID int64
 }
 
+type pendingGoroutine struct {
+	name       string
+	createdAt  float64
+	startedAt  float64
+	hasCreated bool
+	hasStarted bool
+}
+
 // NewParseState creates a fresh parser state.
 func NewParseState(opt Options) *ParseState {
 	return &ParseState{
-		Roles:            make(map[int64]string),
-		Interested:       make(map[int64]struct{}),
-		Active:           make(map[int64]op),
-		Last:             make(map[int64]op),
-		auditCounts:      make(map[string]int64),
-		hasSend:          make(map[skey]bool),
-		Opt:              opt,
-		sendsByKey:       make(map[OpKey][]sendRecord),
-		lastChPtrByG:     make(map[int64]string),
-		lastChPtrSeqByG:  make(map[int64]int64),
-		lastChNameByG:    make(map[int64]string),
-		lastChNameSeqByG: make(map[int64]int64),
-		eventIndexByG:    make(map[int64]int64),
-		lastValue:        make(map[int64]string),
-		activeAttempt:    make(map[int64]string),
+		Roles:             make(map[int64]string),
+		Interested:        make(map[int64]struct{}),
+		Active:            make(map[int64]op),
+		Last:              make(map[int64]op),
+		pendingGoroutines: make(map[int64]pendingGoroutine),
+		auditCounts:       make(map[string]int64),
+		hasSend:           make(map[skey]bool),
+		Opt:               opt,
+		sendsByKey:        make(map[OpKey][]sendRecord),
+		lastChPtrByG:      make(map[int64]string),
+		lastChPtrSeqByG:   make(map[int64]int64),
+		lastChNameByG:     make(map[int64]string),
+		lastChNameSeqByG:  make(map[int64]int64),
+		eventIndexByG:     make(map[int64]int64),
+		lastValue:         make(map[int64]string),
+		activeAttempt:     make(map[int64]string),
 		attemptsByG: make(map[int64]struct {
 			id, ch, kind, ptr string
 			time              float64
@@ -210,6 +246,7 @@ func (st *ParseState) incAudit(reason string) {
 }
 
 func (st *ParseState) auditSummaryEvent(source string) TimelineEvent {
+	st.finalizePendingGoroutines()
 	counts := make(map[string]int64, len(st.auditCounts))
 	for k, v := range st.auditCounts {
 		counts[k] = v
@@ -231,6 +268,148 @@ func (st *ParseState) newID(prefix string) string {
 	id := fmt.Sprintf("%s%d", prefix, st.nextID)
 	st.nextID++
 	return id
+}
+
+func (st *ParseState) markGoroutineInterested(gid int64) {
+	st.Interested[gid] = struct{}{}
+	if _, ok := st.pendingGoroutines[gid]; ok {
+		delete(st.pendingGoroutines, gid)
+	}
+}
+
+func (st *ParseState) setRole(gid int64, role string) {
+	st.Roles[gid] = role
+	switch st.Roles[gid] {
+	case "main":
+		st.lastMainG = gid
+	case "worker":
+		st.lastWorkerG = gid
+	case "server":
+		st.lastServerG = gid
+	case "client":
+		st.lastClientG = gid
+	}
+}
+
+func (st *ParseState) ensureRole(gid int64, role string) {
+	if _, ok := st.Roles[gid]; !ok {
+		st.setRole(gid, role)
+	}
+}
+
+func (st *ParseState) shouldTrackGoroutine(name string) bool {
+	switch st.Opt.GoroutineFilter {
+	case GoroutineFilterLegacy:
+		return name == "main.main" || strings.Contains(name, "/workload.")
+	case GoroutineFilterAll:
+		return true
+	default:
+		return name == "main.main" || strings.Contains(name, "/workload.")
+	}
+}
+
+func (st *ParseState) roleForName(name, fallback string) string {
+	if name == "main.main" {
+		return "main"
+	}
+	if strings.Contains(name, "/workload.") {
+		return "worker"
+	}
+	return fallback
+}
+
+func (st *ParseState) hasChannelOps(gid int64) bool {
+	if _, ok := st.Active[gid]; ok {
+		return true
+	}
+	if _, ok := st.Last[gid]; ok {
+		return true
+	}
+	if _, ok := st.lastChPtrByG[gid]; ok {
+		return true
+	}
+	if _, ok := st.lastChNameByG[gid]; ok {
+		return true
+	}
+	return false
+}
+
+func (st *ParseState) activateGoroutineFromOp(gid int64, emit func(TimelineEvent) error) error {
+	if _, ok := st.Interested[gid]; ok {
+		return nil
+	}
+	pending := st.pendingGoroutines[gid]
+	switch st.Opt.GoroutineFilter {
+	case GoroutineFilterAll:
+		st.markGoroutineInterested(gid)
+		st.ensureRole(gid, st.roleForName(pending.name, "unknown"))
+		return st.emitPendingLifecycle(gid, emit)
+	case GoroutineFilterLegacy:
+		return nil
+	default:
+		st.markGoroutineInterested(gid)
+		st.ensureRole(gid, st.roleForName(pending.name, "worker"))
+		return st.emitPendingLifecycle(gid, emit)
+	}
+}
+
+func (st *ParseState) emitPendingLifecycle(gid int64, emit func(TimelineEvent) error) error {
+	pending, ok := st.pendingGoroutines[gid]
+	if !ok {
+		return nil
+	}
+	name := pending.name
+	if name == "" {
+		name = "?"
+	}
+	role := st.Roles[gid]
+	if pending.hasCreated {
+		if err := emit(TimelineEvent{TimeMs: pending.createdAt, Event: "goroutine_created", G: gid, Func: name, Role: role, Source: "state"}); err != nil {
+			return err
+		}
+	}
+	if pending.hasStarted {
+		if err := emit(TimelineEvent{TimeMs: pending.startedAt, Event: "goroutine_started", G: gid, Func: name, Role: role, Source: "state"}); err != nil {
+			return err
+		}
+		if st.Opt.EmitAtomic {
+			var parent int64
+			if name != "main.main" {
+				parent = st.lastMainG
+			}
+			_ = emit(TimelineEvent{TimeMs: pending.startedAt, Event: "go_start", ID: st.newID("g"), G: gid, Func: name, ParentG: parent, Role: role, Source: "state"})
+		}
+	}
+	delete(st.pendingGoroutines, gid)
+	return nil
+}
+
+func (st *ParseState) finalizePendingGoroutines() {
+	if st.pendingGoroutinesAudited {
+		return
+	}
+	st.pendingGoroutinesAudited = true
+	if st.Opt.GoroutineFilter == GoroutineFilterLegacy {
+		st.pendingGoroutines = make(map[int64]pendingGoroutine)
+		return
+	}
+	if st.Opt.GoroutineFilter == GoroutineFilterAll {
+		for gid := range st.pendingGoroutines {
+			st.markGoroutineInterested(gid)
+			st.ensureRole(gid, st.roleForName(st.pendingGoroutines[gid].name, "unknown"))
+		}
+		st.pendingGoroutines = make(map[int64]pendingGoroutine)
+		return
+	}
+	for gid := range st.pendingGoroutines {
+		if st.hasChannelOps(gid) {
+			st.markGoroutineInterested(gid)
+			st.ensureRole(gid, st.roleForName(st.pendingGoroutines[gid].name, "worker"))
+			continue
+		}
+		st.incAudit(auditGoroutineLifecycleFilteredByMissingOps)
+	}
+	st.pendingGoroutines = make(map[int64]pendingGoroutine)
 }
 
 func (st *ParseState) channelKey(ck chKey, ptr string) string {
@@ -542,33 +721,13 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 		if l.Category == "role" {
 			msg := strings.TrimSpace(l.Message)
 			if msg != "" {
-				st.Roles[gid] = msg
-				st.Interested[gid] = struct{}{}
-				switch msg {
-				case "main":
-					st.lastMainG = gid
-				case "worker":
-					st.lastWorkerG = gid
-				case "server":
-					st.lastServerG = gid
-				case "client":
-					st.lastClientG = gid
-				}
+				st.setRole(gid, msg)
+				st.markGoroutineInterested(gid)
 			}
 		}
 		if l.Category == "main" || l.Category == "worker" || l.Category == "server" || l.Category == "client" {
-			st.Roles[gid] = l.Category
-			st.Interested[gid] = struct{}{}
-			if l.Category == "main" {
-				st.lastMainG = gid
-			} else if l.Category == "worker" {
-				st.lastWorkerG = gid
-			}
-			if l.Category == "server" {
-				st.lastServerG = gid
-			} else if l.Category == "client" {
-				st.lastClientG = gid
-			}
+			st.setRole(gid, l.Category)
+			st.markGoroutineInterested(gid)
 		}
 		msg := l.Message
 		if l.Category == "value" {
@@ -752,34 +911,39 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				break
 			}
 		}
+		if fn == "" {
+			fn = "?"
+		}
 
 		// Creation: track goroutine creation for known workload packages
 		if oldState == xtrace.GoNotExist && (newState == xtrace.GoRunnable || newState == xtrace.GoWaiting) {
-			if strings.Contains(fn, "/workload.") {
-				st.Interested[gid] = struct{}{}
-				if _, ok := st.Roles[gid]; !ok {
-					st.Roles[gid] = "worker"
-				}
+			if st.Opt.GoroutineFilter == GoroutineFilterAll {
+				st.markGoroutineInterested(gid)
+				st.ensureRole(gid, st.roleForName(fn, "unknown"))
 				return emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_created", G: gid, Func: fn, Role: st.Roles[gid], Source: "state"})
 			}
-			st.incAudit(auditGoroutineLifecycleFiltered)
+			if st.shouldTrackGoroutine(fn) {
+				st.markGoroutineInterested(gid)
+				st.ensureRole(gid, st.roleForName(fn, "worker"))
+				return emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_created", G: gid, Func: fn, Role: st.Roles[gid], Source: "state"})
+			}
+			pending := st.pendingGoroutines[gid]
+			pending.name = fn
+			pending.createdAt = tsMs
+			pending.hasCreated = true
+			st.pendingGoroutines[gid] = pending
+			if st.Opt.GoroutineFilter == GoroutineFilterLegacy {
+				st.incAudit(auditGoroutineLifecycleFilteredByName)
+			}
 			return nil
 		}
 
 		// Start: record and track main and pingpong goroutines
 		if oldState == xtrace.GoRunnable && newState == xtrace.GoRunning {
 			name := fn
-			if name == "" {
-				name = "?"
-			}
-			if name == "main.main" || strings.Contains(name, "/workload.") {
-				st.Interested[gid] = struct{}{}
-				if name == "main.main" {
-					st.Roles[gid] = "main"
-					st.lastMainG = gid
-				} else {
-					st.Roles[gid] = "worker"
-				}
+			if st.Opt.GoroutineFilter == GoroutineFilterAll {
+				st.markGoroutineInterested(gid)
+				st.ensureRole(gid, st.roleForName(name, "unknown"))
 				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_started", G: gid, Func: name, Role: st.Roles[gid], Source: "state"}); err != nil {
 					return err
 				}
@@ -793,7 +957,30 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				}
 				return nil
 			}
-			st.incAudit(auditGoroutineLifecycleFiltered)
+			if st.shouldTrackGoroutine(name) {
+				st.markGoroutineInterested(gid)
+				st.ensureRole(gid, st.roleForName(name, "worker"))
+				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_started", G: gid, Func: name, Role: st.Roles[gid], Source: "state"}); err != nil {
+					return err
+				}
+				if st.Opt.EmitAtomic {
+					// Best-effort parent inference: main → worker
+					var parent int64
+					if name != "main.main" {
+						parent = st.lastMainG
+					}
+					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "go_start", ID: st.newID("g"), G: gid, Func: name, ParentG: parent, Role: st.Roles[gid], Source: "state"})
+				}
+				return nil
+			}
+			pending := st.pendingGoroutines[gid]
+			pending.name = name
+			pending.startedAt = tsMs
+			pending.hasStarted = true
+			st.pendingGoroutines[gid] = pending
+			if st.Opt.GoroutineFilter == GoroutineFilterLegacy {
+				st.incAudit(auditGoroutineLifecycleFilteredByName)
+			}
 			return nil
 		}
 
@@ -882,6 +1069,9 @@ func (st *ParseState) handleRegionBegin(kind, ch string, gid int64, role string,
 	}
 	st.Active[gid] = op{kind: kind, ch: ch, ptr: chPtr}
 	st.Last[gid] = st.Active[gid]
+	if err := st.activateGoroutineFromOp(gid, emit); err != nil {
+		return err
+	}
 	ev := "send_attempt"
 	if kind == "recv" {
 		ev = "recv_attempt"
@@ -939,6 +1129,9 @@ func (st *ParseState) handleRegionBegin(kind, ch string, gid int64, role string,
 }
 
 func (st *ParseState) handleChanOp(ev, ch string, gid int64, role string, t float64, val *int, source string, emit func(TimelineEvent) error) error {
+	if err := st.activateGoroutineFromOp(gid, emit); err != nil {
+		return err
+	}
 	// Optional synthesis: ensure a send exists before a recv
 	ck := parseChKey(ch)
 	if strings.HasSuffix(ev, "_recv") && st.Opt.SynthOnRecv {

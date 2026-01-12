@@ -284,7 +284,12 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "runner error: "+msg)
 		return
 	}
-	opts := traceproc.Options{SynthOnRecv: optSynthHTTP, DropBlockNoCh: optDropHTTP, EmitAtomic: true}
+	opts := traceproc.Options{
+		SynthOnRecv:     optSynthHTTP,
+		DropBlockNoCh:   optDropHTTP,
+		EmitAtomic:      true,
+		GoroutineFilter: traceproc.ParseGoroutineFilterMode(os.Getenv("GTV_FILTER_GOROUTINES")),
+	}
 	st := traceproc.NewParseState(opts)
 	var timeline []traceproc.TimelineEvent
 	emit := func(ev traceproc.TimelineEvent) error { timeline = append(timeline, ev); return nil }
@@ -831,7 +836,12 @@ func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, dro
 		_ = cmd.Process.Kill()
 		return err
 	}
-	opts := traceproc.Options{SynthOnRecv: synth, DropBlockNoCh: drop, EmitAtomic: true}
+	opts := traceproc.Options{
+		SynthOnRecv:     synth,
+		DropBlockNoCh:   drop,
+		EmitAtomic:      true,
+		GoroutineFilter: traceproc.ParseGoroutineFilterMode(os.Getenv("GTV_FILTER_GOROUTINES")),
+	}
 	st := traceproc.NewParseState(opts)
 	var liveLogFile *os.File
 	var liveLogCount int
