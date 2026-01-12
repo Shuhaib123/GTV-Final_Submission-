@@ -195,9 +195,13 @@
       const gNotes = $("#notes");
       const featureFlags = (() => {
         const params = new URLSearchParams(location.search);
+        const defaults = {
+          enableIORegions: false,
+          enableSelectScaffolding: false,
+        };
         return {
-          enableIORegions: params.get("io") === "1",
-          enableSelectScaffolding: params.get("select") === "1",
+          enableIORegions: params.get("io") === "1" ? true : defaults.enableIORegions,
+          enableSelectScaffolding: params.get("select") === "1" ? true : defaults.enableSelectScaffolding,
         };
       })();
       const warningsPanel = $("#warningsPanel");

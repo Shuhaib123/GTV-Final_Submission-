@@ -53,6 +53,9 @@ var instrOpts = Options{
 // SetOptions overrides the package-level default options at runtime. Tests
 // and callers can use this to programmatically change instrumentation flags.
 func SetOptions(o Options) {
+	if mvpEnabled() {
+		o = applyMVPDefaults(o)
+	}
 	instrOpts = o
 }
 
@@ -63,6 +66,24 @@ func boolEnv(name string, def bool) bool {
 	}
 	v = strings.ToLower(v)
 	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func mvpEnabled() bool {
+	return boolEnv("GTV_MVP", false)
+}
+
+func applyMVPDefaults(o Options) Options {
+	o.AddIORegions = false
+	o.AddIOJSONRegions = false
+	o.AddIODBRegions = false
+	o.AddIOHTTPRegions = false
+	o.AddIOOSRegions = false
+	o.IOAssumeBackground = false
+	o.AddLoopRegions = false
+	o.AddHTTPHandlerTasks = false
+	o.AddGRPCTasks = false
+	o.AddValueLogs = false
+	return o
 }
 
 // ValueLogsEnv reports whether the shared value-logging flag is enabled.
@@ -292,6 +313,10 @@ func ParseOptionsFromEnvAndDirectives(file *ast.File, base Options) (opts Option
 				}
 			}
 		}
+	}
+
+	if mvpEnabled() {
+		opts = applyMVPDefaults(opts)
 	}
 
 	return opts, onlySet, skipSet, timeoutNS, hasTimeout, doneName

@@ -43,6 +43,7 @@ var (
 	optWorkload string
 	optBCMode   string
 	optLiveLog  bool
+	optEmitAtom bool
 )
 
 func envBool(name string) bool {
@@ -58,9 +59,11 @@ func main() {
 	}
 	synthDefault := envBool("GTV_SYNTH_SEND")
 	dropDefault := envBool("GTV_DROP_BLOCK_NO_CH")
+	mvpDefault := envBool("GTV_MVP")
 	addrFlag := flag.String("addr", addrDefault, "HTTP listen address, e.g. :8080")
 	synthFlag := flag.Bool("synth", synthDefault, "synthesize *_send before unmatched *_recv")
 	dropFlag := flag.Bool("drop-block-no-ch", dropDefault, "drop blocked events without channel label")
+	mvpFlag := flag.Bool("mvp", mvpDefault, "force MVP defaults (disable IO/loop/HTTP/GRPC/value logs)")
 	wlDefault := os.Getenv("GTV_WORKLOAD")
 	if wlDefault == "" {
 		wlDefault = "pingpong"
@@ -73,6 +76,7 @@ func main() {
 	liveLogDefault := envBool("GTV_LIVE_LOG")
 	bcModeFlag := flag.String("bc-mode", bcModeDefault, "broadcast mode: buffered|blocking")
 	liveLogFlag := flag.Bool("live-log", liveLogDefault, "write trace.live.<run>.json while running")
+	atomicFlag := flag.Bool("atomic", false, "emit atomic attempt/commit events alongside legacy events")
 	flag.Parse()
 	listenAddr = *addrFlag
 	optSynth = *synthFlag
@@ -80,6 +84,10 @@ func main() {
 	optWorkload = strings.ToLower(*wlFlag)
 	optBCMode = strings.ToLower(*bcModeFlag)
 	optLiveLog = *liveLogFlag
+	optEmitAtom = *atomicFlag
+	if *mvpFlag {
+		_ = os.Setenv("GTV_MVP", "1")
+	}
 
 	// Serve static assets from ./web
 	fs := http.FileServer(http.Dir("web"))
@@ -287,7 +295,7 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	opts := traceproc.Options{
 		SynthOnRecv:     optSynthHTTP,
 		DropBlockNoCh:   optDropHTTP,
-		EmitAtomic:      true,
+		EmitAtomic:      optEmitAtom,
 		GoroutineFilter: traceproc.ParseGoroutineFilterMode(os.Getenv("GTV_FILTER_GOROUTINES")),
 	}
 	st := traceproc.NewParseState(opts)
@@ -839,7 +847,7 @@ func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, dro
 	opts := traceproc.Options{
 		SynthOnRecv:     synth,
 		DropBlockNoCh:   drop,
-		EmitAtomic:      true,
+		EmitAtomic:      optEmitAtom,
 		GoroutineFilter: traceproc.ParseGoroutineFilterMode(os.Getenv("GTV_FILTER_GOROUTINES")),
 	}
 	st := traceproc.NewParseState(opts)
