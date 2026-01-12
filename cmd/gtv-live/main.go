@@ -227,7 +227,7 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	bcModeQ := r.URL.Query().Get("bc_mode")
 	timeoutQ := strings.TrimSpace(r.URL.Query().Get("timeout"))
 	if timeoutQ == "" {
-		timeoutQ = "4s"
+		timeoutQ = "20s"
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), runJSONTimeout)
 	defer cancel()

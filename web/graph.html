@@ -1232,7 +1232,12 @@ function refreshGraphExtentFromNodes(nodes) {
                                                 return (d.kind === 'send') ? 'url(#arrow-send)' : (d.kind === 'recv' ? 'url(#arrow-recv)' : null);
                                         });
 
-                                        annLink.attr('d', d => `M${d.source.x},${d.source.y} L${d.target.x},${d.target.y}`);
+                                        annLink.attr('d', d => {
+                                                const s = (typeof d.source === 'string') ? idMap[d.source] : d.source;
+                                                const t = (typeof d.target === 'string') ? idMap[d.target] : d.target;
+                                                if (!s || !t || !Number.isFinite(s.x) || !Number.isFinite(t.x)) return '';
+                                                return `M${s.x},${s.y} L${t.x},${t.y}`;
+                                        });
                                         create.attr('d', d => {
                                                 const s = nodes.find(n => n.id === d.source.id) || d.source;
                                                 const t = nodes.find(n => n.id === d.target.id) || d.target;

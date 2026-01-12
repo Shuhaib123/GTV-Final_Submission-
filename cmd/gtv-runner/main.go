@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"jspt/gtv"
 	"jspt/internal/workload"
 	"log"
 	"os"
 	"runtime/trace"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -18,10 +21,11 @@ func main() {
 	if *wl == "" {
 		log.Fatal("-workload is required")
 	}
+	gtv.InstallStopOnSignal()
 
 	// Start writing the runtime/trace stream to stdout. The live server reads
 	// ONLY stdout as a binary trace stream. Any textual prints must go to stderr.
-	if err := trace.Start(os.Stdout); err != nil {
+	if err := gtv.Start(os.Stdout); err != nil {
 		log.Fatal(err)
 	}
 	// Redirect all subsequent fmt.Print* and default log output to stderr so
@@ -53,16 +57,46 @@ func main() {
 		close(done)
 	}()
 
-	// Optional timeout handling
+	// Optional timeout handling: set env for in-process hooks + escalation signals.
 	if d, err := time.ParseDuration(*timeoutStr); err == nil && d > 0 {
-		select {
-		case <-done:
-		case <-time.After(d):
-			log.Printf("gtv-runner: timeout %s reached; stopping trace", d)
+		ms := int(d / time.Millisecond)
+		if ms <= 0 {
+			ms = 1
 		}
-	} else {
-		<-done
+		_ = os.Setenv("GTV_TIMEOUT_MS", strconv.Itoa(ms))
+		gtv.InstallStopAfterFromEnv("GTV_TIMEOUT_MS")
+		grace := 500 * time.Millisecond
+		proc, _ := os.FindProcess(os.Getpid())
+		go func() {
+			select {
+			case <-done:
+				return
+			case <-time.After(d + grace):
+			}
+			if proc != nil {
+				_ = proc.Signal(os.Interrupt)
+			}
+			select {
+			case <-done:
+				return
+			case <-time.After(grace):
+			}
+			if proc != nil {
+				_ = proc.Signal(syscall.SIGTERM)
+			}
+			select {
+			case <-done:
+				return
+			case <-time.After(grace):
+			}
+			if proc != nil {
+				_ = proc.Signal(syscall.SIGKILL)
+			}
+		}()
 	}
+
+	<-done
 	task.End()
-	trace.Stop()
+	gtv.Stop()
+	gtv.Flush()
 }

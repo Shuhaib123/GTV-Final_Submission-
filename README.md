@@ -115,6 +115,19 @@ Notes:
 - Offline parsing uses the same event processor as live; you can enable `GTV_SYNTH_SEND=1` during `go run .` to synthesize missing sends in JSON too.
 - MVP rule (channel pairing strategy A): emit `chan_send` only at send completion time (no retroactive emission), assign a `MsgID` on send and propagate it to the matched recv, and optionally emit a lightweight `pair` event at recv time.
 
+## Non-terminating programs
+
+Instrumented binaries install signal/time-based flushing hooks by default. This lets
+you get a valid `trace.json` even if the program never exits on its own.
+
+- Ctrl+C (SIGINT) or SIGTERM triggers a stop + flush.
+- Runner timeout: `--timeout 500ms` (or any Go duration) stops and flushes.
+- Advanced: set `GTV_TIMEOUT_MS=500` (milliseconds) for direct runs without the runner.
+
+Examples:
+- `go run ./cmd/gtv-runner -workload broadcast -timeout 2s`
+- `GTV_TIMEOUT_MS=750 go run .`
+
 
 ## How It Works
 

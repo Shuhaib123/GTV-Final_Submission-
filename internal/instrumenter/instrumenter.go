@@ -26,6 +26,36 @@ func (g *nameGen) next(kind string) string {
 	return name
 }
 
+func funcHasSelectorCall(fn *ast.FuncDecl, pkg, name string) bool {
+	if fn == nil || fn.Body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		id, ok := sel.X.(*ast.Ident)
+		if !ok || id.Name != pkg {
+			return true
+		}
+		if sel.Sel != nil && sel.Sel.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // (Options and helpers moved to options.go)
 
 // InstrumentProgram converts a Go 'main' program into a workload file that
@@ -125,6 +155,8 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 		if !ok || fn.Name == nil || fn.Name.Name != "main" {
 			return true
 		}
+		hasStopOnSignal := funcHasSelectorCall(fn, "gtv", "InstallStopOnSignal")
+		hasStopAfter := funcHasSelectorCall(fn, "gtv", "InstallStopAfterFromEnv")
 		fn.Name.Name = runName
 		// params: (ctx context.Context)
 		fn.Type.Params = &ast.FieldList{List: []*ast.Field{{
@@ -140,7 +172,22 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 		}
 		deferTask := &ast.DeferStmt{Call: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent(taskName), Sel: ast.NewIdent("End")}}}
 		logStart := &ast.ExprStmt{X: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent("trace"), Sel: ast.NewIdent("Log")}, Args: []ast.Expr{ast.NewIdent(runCtxName), &ast.BasicLit{Kind: token.STRING, Value: "\"main\""}, &ast.BasicLit{Kind: token.STRING, Value: fmt.Sprintf("\"%s starting\"", name)}}}}
-		fn.Body.List = append([]ast.Stmt{assign, deferTask, logStart}, fn.Body.List...)
+		prelude := []ast.Stmt{assign, deferTask, logStart}
+		if !hasStopOnSignal {
+			prelude = append(prelude, &ast.ExprStmt{X: &ast.CallExpr{
+				Fun: &ast.SelectorExpr{X: ast.NewIdent("gtv"), Sel: ast.NewIdent("InstallStopOnSignal")},
+			}})
+		}
+		if !hasStopAfter {
+			prelude = append(prelude, &ast.ExprStmt{X: &ast.CallExpr{
+				Fun:  &ast.SelectorExpr{X: ast.NewIdent("gtv"), Sel: ast.NewIdent("InstallStopAfterFromEnv")},
+				Args: []ast.Expr{&ast.BasicLit{Kind: token.STRING, Value: "\"GTV_TIMEOUT_MS\""}},
+			}})
+		}
+		if !hasStopOnSignal || !hasStopAfter {
+			ensureImport("jspt/gtv")
+		}
+		fn.Body.List = append(prelude, fn.Body.List...)
 		runFn = fn
 		ctxNameByFunc[fn] = runCtxName
 		return false

@@ -112,6 +112,64 @@ func TestLiveOrdering(t *testing.T) {
 	}
 }
 
+func TestTimeoutStillEmitsTrace(t *testing.T) {
+	tc := workloadCase{Name: "non_terminating", File: "non_terminating.go"}
+	root := repoRoot(t)
+	workloadTitle := camel("e2e_" + tc.Name)
+	workloadName := strings.ToLower(workloadTitle)
+	instrumenter.SetOptions(instrumenter.Options{
+		Level:               "regions",
+		GuardDynamicLabels:  true,
+		AddGoroutineRegions: true,
+		AddBlockRegions:     true,
+	})
+
+	srcPath := filepath.Join(root, "internal", "e2e", "testdata", "examples", tc.File)
+	src, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatalf("read example: %v", err)
+	}
+
+	instrumented, err := instrumenter.InstrumentProgram(src, workloadTitle)
+	if err != nil {
+		t.Fatalf("instrument example: %v", err)
+	}
+
+	tagName := "workload_" + workloadName
+	genPath := filepath.Join(root, "internal", "workload", workloadName+"_e2e_gen.go")
+	if err := writeInstrumented(genPath, tagName, instrumented); err != nil {
+		t.Fatalf("write instrumented: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(genPath)
+	})
+
+	tracePath := filepath.Join(t.TempDir(), workloadName+".trace")
+	if err := runWorkloadWithTimeout(root, tagName, workloadName, tracePath, "200ms"); err != nil {
+		t.Fatalf("run workload: %v", err)
+	}
+
+	events := parseTrace(t, tracePath)
+	if len(events) == 0 {
+		t.Fatal("expected non-empty trace")
+	}
+	jsonPath := filepath.Join(t.TempDir(), "trace.json")
+	if err := writeEventsJSON(jsonPath, events); err != nil {
+		t.Fatalf("write trace.json: %v", err)
+	}
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read trace.json: %v", err)
+	}
+	var roundTrip []traceproc.TimelineEvent
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("parse trace.json: %v", err)
+	}
+	if len(roundTrip) == 0 {
+		t.Fatal("expected non-empty parsed JSON")
+	}
+}
+
 type e2eResult struct {
 	WorkloadName string
 	Events       []traceproc.TimelineEvent
@@ -151,7 +209,7 @@ func runE2E(t *testing.T, tc workloadCase) e2eResult {
 	})
 
 	tracePath := filepath.Join(t.TempDir(), workloadName+".trace")
-	if err := runWorkload(root, tagName, workloadName, tracePath); err != nil {
+	if err := runWorkloadWithTimeout(root, tagName, workloadName, tracePath, "3s"); err != nil {
 		t.Fatalf("run workload: %v", err)
 	}
 
@@ -161,18 +219,32 @@ func runE2E(t *testing.T, tc workloadCase) e2eResult {
 	return e2eResult{WorkloadName: workloadName, Events: events, Summary: summary}
 }
 
-func runWorkload(root, tagName, workloadName, tracePath string) error {
+func runWorkloadWithTimeout(root, tagName, workloadName, tracePath, timeout string) error {
 	outFile, err := os.Create(tracePath)
 	if err != nil {
 		return err
 	}
 	defer outFile.Close()
-	cmd := exec.Command("go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", workloadName, "-timeout", "3s")
+	cmd := exec.Command("go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", workloadName, "-timeout", timeout)
 	cmd.Dir = root
 	cmd.Stdout = outFile
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), "GTV_INSTR_CONFIG=", "GTV_INSTR_LEVEL=")
 	return cmd.Run()
+}
+
+func writeEventsJSON(path string, events []traceproc.TimelineEvent) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(events); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func parseTrace(t *testing.T, tracePath string) []traceproc.TimelineEvent {

@@ -55,6 +55,7 @@ package main
 import (
 	"context"
 	"flag"
+	"jspt/gtv"
 	"jspt/internal/workload"
 	"log"
 	"os"
@@ -79,9 +80,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create trace file: %v", err)
 	}
-	if err := trace.Start(f); err != nil {
+	if err := gtv.Start(f); err != nil {
 		log.Fatalf("failed to start trace: %v", err)
 	}
+	gtv.SetFlushFunc(func() error {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		return WritePingPongTimelineJSON("trace.out", "trace.json")
+	})
 
 	// Choose workload from env: GTV_WORKLOAD=pingpong|broadcast|skipgraph_full|mergesort (default: pingpong)
 	wl := os.Getenv("GTV_WORKLOAD")
@@ -96,13 +103,8 @@ func main() {
 	// First, allow dynamically registered workloads.
 	if workload.RunByName(ctx, wl) {
 		// Stop tracing and close the trace file before parsing it.
-		trace.Stop()
-		if err := f.Close(); err != nil {
-			log.Fatalf("failed to close trace file: %v", err)
-		}
-		if err := WritePingPongTimelineJSON("trace.out", "trace.json"); err != nil {
-			log.Fatalf("failed to write timeline JSON: %v", err)
-		}
+		gtv.Stop()
+		gtv.Flush()
 		return
 	}
 
@@ -117,13 +119,6 @@ func main() {
 		workload.RunPingPongProgram(ctx)
 	}
 	// Stop tracing and close the trace file before parsing it.
-	trace.Stop()
-	if err := f.Close(); err != nil {
-		log.Fatalf("failed to close trace file: %v", err)
-	}
-
-	// Write the timeline to JSON.
-	if err := WritePingPongTimelineJSON("trace.out", "trace.json"); err != nil {
-		log.Fatalf("failed to write timeline JSON: %v", err)
-	}
+	gtv.Stop()
+	gtv.Flush()
 }

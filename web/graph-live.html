@@ -849,10 +849,21 @@
         });
       }
       function updateEdge(e) {
-        const ax = e.a.x,
-          ay = e.a.y,
-          bx = e.b.x,
-          by = e.b.y;
+        const ax = e?.a?.x,
+          ay = e?.a?.y,
+          bx = e?.b?.x,
+          by = e?.b?.y;
+        if (
+          !Number.isFinite(ax) ||
+          !Number.isFinite(ay) ||
+          !Number.isFinite(bx) ||
+          !Number.isFinite(by)
+        ) {
+          try {
+            e?.path?.setAttribute("d", "");
+          } catch {}
+          return;
+        }
         // Update the path with per-edge curvature to fan out siblings
         const dx = bx - ax,
           dy = by - ay;
