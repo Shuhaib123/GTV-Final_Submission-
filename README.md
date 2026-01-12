@@ -43,6 +43,8 @@ GTV is a tiny experiment to visualize Go concurrency from runtime traces. It sup
      - `-addr string` (default `:8080`) — HTTP listen address
      - `-synth` — enable send synthesis (same as `GTV_SYNTH_SEND=1`)
      - `-drop-block-no-ch` — drop unlabeled blocked events (same as `GTV_DROP_BLOCK_NO_CH=1`)
+     - `-atomic` — emit atomic attempt/commit events (disabled by default)
+     - `-mvp` — force MVP defaults (disable IO regions, loop regions, HTTP/GRPC tasks, value logs)
 3. Open the UI:
    - `http://localhost:8080/` → choose “Live Visualizer” (or open `http://localhost:8080/graph-live.html` directly)
 4. The page auto-connects to `/trace` and auto-starts a run; use the “Re-run” button for another run without reloading.
@@ -51,6 +53,7 @@ Environment options:
 - `GTV_SYNTH_SEND=1` — synthesize a send just before any unmatched recv to keep edges complete.
 - `GTV_DROP_BLOCK_NO_CH=1` — drop blocked events that cannot be tied to a channel.
 - `GTV_FILTER_GOROUTINES=legacy` — keep legacy goroutine filtering (only `main.main` + `/workload.`).
+- `GTV_MVP=1` — force MVP defaults (disable IO regions, loop regions, HTTP/GRPC tasks, value logs).
 
 Examples:
 - Flags: `go run ./cmd/gtv-live -addr :9090 -synth -drop-block-no-ch`
@@ -69,6 +72,7 @@ Live server env flags:
 - `GTV_WORKLOAD` — workload name override for the live runner.
 - `GTV_BC_MODE` — broadcast mode selector (if supported by workload).
 - `GTV_LIVE_LOG` — enable verbose live logging.
+- `GTV_MVP` — force MVP defaults (disable IO regions, loop regions, HTTP/GRPC tasks, value logs).
 
 Trace processor env flags:
 - `GTV_SKIP_PAIRING_CHANNELS` — comma‑separated channel names to skip pairing.
@@ -90,6 +94,7 @@ Instrumenter env flags (apply to `gtv-instrument` and the in-browser `/instrumen
 - `GTV_INSTR_IO_ASSUME_BG`
 - `GTV_INSTR_LEVEL`
 - `GTV_INSTR_CONFIG` — path to a JSON config file.
+- `GTV_MVP` — force MVP defaults (disable IO regions, loop regions, HTTP/GRPC tasks, value logs).
 
 Instrumenter JSON config keys (via `GTV_INSTR_CONFIG`):
 - `guard_labels`, `goroutine_regions`, `block_regions`, `http_tasks`, `grpc_tasks`, `loop_regions`
