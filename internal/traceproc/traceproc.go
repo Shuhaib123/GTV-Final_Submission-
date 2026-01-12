@@ -1483,6 +1483,13 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 			ev.Seq = int64(i + 1)
 		}
 		name := strings.ToLower(ev.Event)
+		if isChannelEvent(name) && ev.ChannelKey == "" {
+			if ev.ChPtr != "" {
+				ev.ChannelKey = ev.ChPtr
+			} else if key := normalizeChannelKey(ev.Channel); key != "" {
+				ev.ChannelKey = key
+			}
+		}
 		if isGoroutineEvent(name) && ev.G == 0 {
 			warnings = append(warnings, fmt.Sprintf("missing goroutine id for %s (seq=%d time_ns=%d)", ev.Event, ev.Seq, ev.TimeNs))
 		}
@@ -1495,6 +1502,7 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 				if ev.ChannelKey == "" {
 					ev.ChannelKey = unknown
 				}
+				ev.MissingPtr = true
 				warnings = append(warnings, fmt.Sprintf("missing channel identity for %s (g=%d seq=%d time_ns=%d)", ev.Event, ev.G, ev.Seq, ev.TimeNs))
 			}
 		}
@@ -1519,6 +1527,7 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 		}
 		return strings.ToLower(a.Event) < strings.ToLower(b.Event)
 	})
+	warnings = append(warnings, validateChannelIdentities(normalized)...)
 	return TimelineEnvelope{
 		SchemaVersion: TimelineSchemaVersion,
 		Events:        normalized,
@@ -1568,4 +1577,18 @@ func isPairingEvent(name, source string) bool {
 	default:
 		return false
 	}
+}
+
+func validateChannelIdentities(events []TimelineEvent) []string {
+	warnings := make([]string, 0)
+	for _, ev := range events {
+		name := strings.ToLower(ev.Event)
+		if !isChannelEvent(name) {
+			continue
+		}
+		if timelineChannelIdentity(ev) == "" {
+			warnings = append(warnings, fmt.Sprintf("validation: channel identity missing for %s (g=%d seq=%d time_ns=%d)", ev.Event, ev.G, ev.Seq, ev.TimeNs))
+		}
+	}
+	return warnings
 }
