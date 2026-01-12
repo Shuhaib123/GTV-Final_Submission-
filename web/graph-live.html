@@ -202,6 +202,9 @@
         return {
           enableIORegions: params.get("io") === "1" ? true : defaults.enableIORegions,
           enableSelectScaffolding: params.get("select") === "1" ? true : defaults.enableSelectScaffolding,
+          enableIORegions: params.get("io") === "1",
+          enableSelectScaffolding: params.get("select") === "1",
+          enableLiveBuffer: params.get("live_buffer") !== "0",
         };
       })();
       const warningsPanel = $("#warningsPanel");
@@ -2735,9 +2738,14 @@
       }
       const LIVE_EVENT_CAP = 5000;
       const LIVE_REBUILD_MS = 200;
+      const LIVE_BUFFER_MAX_EVENTS = 80;
+      const LIVE_BUFFER_MAX_MS = 100;
       let liveRebuildLast = 0;
       let liveRebuildPending = false;
       let liveSeq = 0;
+      let liveBuffer = [];
+      let liveBufferTimer = null;
+      let lastEmittedKey = null;
       function requestLiveRebuild() {
         const now = performance.now();
         const since = now - liveRebuildLast;
@@ -2784,6 +2792,52 @@
           liveSeq += 1;
           evt.seq = liveSeq;
         }
+        if (!featureFlags.enableLiveBuffer) {
+          processLiveEvent(evt, true);
+          return;
+        }
+        enqueueLiveEvent(evt);
+      }
+      function enqueueLiveEvent(evt) {
+        if (lastEmittedKey && compareEvents(evt, lastEmittedKey) < 0) {
+          console.warn("live event out of order beyond buffer window", {
+            time_ns: evt.time_ns,
+            seq: evt.seq,
+            lastEmitted: lastEmittedKey,
+          });
+          processLiveEvent(evt, false);
+          return;
+        }
+        liveBuffer.push({ evt, arrival: performance.now() });
+        flushLiveBuffer(false);
+        if (!liveBufferTimer) {
+          liveBufferTimer = setTimeout(() => {
+            liveBufferTimer = null;
+            flushLiveBuffer(true);
+          }, LIVE_BUFFER_MAX_MS);
+        }
+      }
+      function flushLiveBuffer(force) {
+        if (!liveBuffer.length) return;
+        let oldest = Infinity;
+        for (const item of liveBuffer) {
+          if (item.arrival < oldest) oldest = item.arrival;
+        }
+        const age = performance.now() - oldest;
+        if (
+          !force &&
+          liveBuffer.length < LIVE_BUFFER_MAX_EVENTS &&
+          age < LIVE_BUFFER_MAX_MS
+        ) {
+          return;
+        }
+        liveBuffer.sort((a, b) => compareEvents(a.evt, b.evt));
+        const batch = liveBuffer.splice(0);
+        for (const item of batch) {
+          processLiveEvent(item.evt, true);
+        }
+      }
+      function processLiveEvent(evt, allowAnimate) {
         if (!t0 || evt.time_ms < t0) {
           t0 = evt.time_ms;
           events.forEach((item) => {
@@ -2805,9 +2859,10 @@
         }
         if (insertIdx <= ui.nextIdx) {
           try {
-            fire(evt, ui.playing);
+            fire(evt, allowAnimate && ui.playing);
           } catch {}
           ui.nextIdx += 1;
+          lastEmittedKey = { time_ns: evt.time_ns, seq: evt.seq };
         }
         T = events.length ? events[events.length - 1].dt : 0;
         const TARGET_MS = 4000;
@@ -2835,6 +2890,12 @@
         snapshotActive = true;
         snapshotApplied = false;
         suppressAutoPlay = true;
+        liveBuffer.length = 0;
+        lastEmittedKey = null;
+        if (liveBufferTimer) {
+          clearTimeout(liveBufferTimer);
+          liveBufferTimer = null;
+        }
         try {
           setPlaying(false);
         } catch {}
@@ -3042,6 +3103,12 @@
               t0 = 0;
               T = 0;
               ui.playing = false;
+              liveBuffer.length = 0;
+              lastEmittedKey = null;
+              if (liveBufferTimer) {
+                clearTimeout(liveBufferTimer);
+                liveBufferTimer = null;
+              }
               const clear = (id) => {
                 const el = document.getElementById(id);
                 if (el) el.innerHTML = "";
