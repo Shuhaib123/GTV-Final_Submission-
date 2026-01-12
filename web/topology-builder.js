@@ -8,6 +8,8 @@
         const canonRecv = 'chan_recv';
         const commitSend = 'chan_send_commit';
         const commitRecv = 'chan_recv_commit';
+        const completeSend = 'send_complete';
+        const completeRecv = 'recv_complete';
 
         function isCommitEvent(evt) {
                 if (!evt || typeof evt.event !== 'string') return false;
@@ -23,6 +25,8 @@
                         const src = String(evt.source || evt.Source || '').toLowerCase();
                         allow = src === 'paired';
                 } else if (name === commitSend || name === commitRecv) {
+                        allow = true;
+                } else if (name === completeSend || name === completeRecv) {
                         allow = true;
                 }
                 if (!allow) return null;
@@ -41,7 +45,7 @@
                 return String(role);
         }
 
-        function pushLink(links, source, target, kind, evt, seq) {
+        function pushLink(links, source, target, kind, evt, seq, options = {}) {
                 const meta = {
                         time_ms: evt?.time_ms ?? 0,
                         value: evt?.value,
@@ -51,6 +55,8 @@
                         ch_ptr: evt?.ch_ptr,
                         msg_id: evt?.msg_id,
                         peer_g: evt?.peer_g,
+                        unknown_peer: options.unknownPeer || false,
+                        partial_pairing: options.partial || false,
                         seq,
                         src: evt?.source || evt?.Source
                 };
@@ -59,6 +65,7 @@
                         source,
                         target,
                         kind,
+                        partial: options.partial || false,
                         meta
                 });
         }
@@ -137,6 +144,10 @@
 
                 const pairedEvents = ordered.filter(e => GTVTopology.isPairedChannelEvent(e));
                 const commitEvents = ordered.filter(e => isCommitEvent(e));
+                const completeEvents = ordered.filter(e => {
+                        const name = e?.event?.toLowerCase();
+                        return name === completeSend || name === completeRecv;
+                });
                 const topologyEvents = [];
                 const seenKeys = new Set();
                 function pushTopologyEvent(evt) {
@@ -147,8 +158,15 @@
                         seenKeys.add(dedupKey);
                         topologyEvents.push(evt);
                 }
+                const pairedEndpointKeys = new Set();
+                for (const evt of pairedEvents) {
+                        const info = topologyEventMeta(evt);
+                        if (!info || typeof evt.g !== 'number') continue;
+                        pairedEndpointKeys.add(`${info.role}:${evt.g}:${info.identity}`);
+                }
                 pairedEvents.forEach(pushTopologyEvent);
                 commitEvents.forEach(pushTopologyEvent);
+                completeEvents.forEach(pushTopologyEvent);
 
 
                 const links = [];
@@ -171,11 +189,19 @@
                         if (drawnKeys.has(dedupKey)) continue;
                         drawnKeys.add(dedupKey);
                         const chId = `ch:${info.identity}`;
+                        const endpointKey = `${info.role}:${evt.g}:${info.identity}`;
+                        const isComplete = info.eventName === completeSend || info.eventName === completeRecv;
+                        if (isComplete && pairedEndpointKeys.has(endpointKey)) continue;
+                        const hasPeer = typeof evt?.peer_g === 'number' && evt.peer_g > 0;
+                        const linkOptions = {
+                                partial: isComplete,
+                                unknownPeer: isComplete && !hasPeer,
+                        };
                         const seq = nextSeq(info.identity);
                         if (info.role === 'send') {
-                                pushLink(links, `g${evt.g}`, chId, 'send', evt, seq);
+                                pushLink(links, `g${evt.g}`, chId, 'send', evt, seq, linkOptions);
                         } else {
-                                pushLink(links, chId, `g${evt.g}`, 'recv', evt, seq);
+                                pushLink(links, chId, `g${evt.g}`, 'recv', evt, seq, linkOptions);
                         }
                 }
 

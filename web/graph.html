@@ -25,6 +25,7 @@
                         <div><span class="swatch" style="background:var(--edge-send)"></span>send</div>
                         <div><span class="swatch" style="background:var(--edge-recv)"></span>recv</div>
                         <div><span class="swatch" style="background:transparent;border:2px dashed var(--main)"></span>spawn</div>
+                        <div class="legend-note"><span class="swatch partial"></span>partial pairing (unknown endpoint)</div>
                         <div style="margin-top:6px"><span class="swatch"
                                         style="background:transparent;border:2px dashed var(--blocked)"></span>goroutine had
                                 block/unblock</div>
@@ -729,7 +730,7 @@ function refreshGraphExtentFromNodes(nodes) {
                                 const bundleG = g.append('g').attr('id','bundles');
                                 const pairLayer = g.append('g').attr('id','pair-edges');
                                 link = linkG.selectAll('.edge').data(links, d => d.id).join('path')
-                                        .attr('class', d => `edge ${d.kind}${d.tentative?' tentative':''}${d.commit?' commit':''}${d.dropped?' dropped':''}${d.meta && d.meta.src === 'synth' ? ' synth' : ''}`)
+                                        .attr('class', d => `edge ${d.kind}${d.tentative?' tentative':''}${d.commit?' commit':''}${d.dropped?' dropped':''}${d.partial?' partial':''}${d.meta && d.meta.src === 'synth' ? ' synth' : ''}`)
                                         .attr('marker-end', d => {
                                                 const styleIsMin = (loadStyle()==='minimal');
                                                 if (styleIsMin) return 'url(#arrow-black)';
@@ -767,6 +768,9 @@ function refreshGraphExtentFromNodes(nodes) {
                                                 if (meta.pair_id) extras.push(`p:${meta.pair_id}`);
                                                 if (meta.attempt_id && attemptToSelect.get(meta.attempt_id)) extras.push(`sid:${attemptToSelect.get(meta.attempt_id)}`);
                                                 if (extras.length) result += ` ${extras.join(' ')}`;
+                                        }
+                                        if (meta.unknown_peer) {
+                                                result += ' (unknown endpoint)';
                                         }
                                         return result;
                                 }
