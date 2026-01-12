@@ -1181,8 +1181,10 @@ function refreshGraphExtentFromNodes(nodes) {
                                 function scheduleDraw(){ needsDraw = true; if (!raf) raf = requestAnimationFrame(()=>{ raf=0; if (needsDraw){ needsDraw=false; redraw(); } }); }
 
                                 function redraw() {
+                                        const hasPos = (v) => Number.isFinite(v);
                                         link.attr('d', d => {
                                                 const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
+                                                if (!hasPos(sx) || !hasPos(sy) || !hasPos(tx) || !hasPos(ty)) return '';
                                                 if (d.curve) {
                                                         const mx = (sx + tx) / 2, my = (sy + ty) / 2;
                                                         const nx = ty - sy, ny = -(tx - sx);
@@ -1199,15 +1201,27 @@ function refreshGraphExtentFromNodes(nodes) {
                                                 return (d.kind === 'send') ? 'url(#arrow-send)' : (d.kind === 'recv' ? 'url(#arrow-recv)' : null);
                                         });
 
-                                        annLink.attr('d', d => `M${d.source.x},${d.source.y} L${d.target.x},${d.target.y}`);
+                                        annLink.attr('d', d => {
+                                                const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
+                                                if (!hasPos(sx) || !hasPos(sy) || !hasPos(tx) || !hasPos(ty)) return '';
+                                                return `M${sx},${sy} L${tx},${ty}`;
+                                        });
                                         create.attr('d', d => {
                                                 const s = nodes.find(n => n.id === d.source.id) || d.source;
                                                 const t = nodes.find(n => n.id === d.target.id) || d.target;
-                                                if (!s.x || !t.x) return '';
+                                                if (!hasPos(s.x) || !hasPos(s.y) || !hasPos(t.x) || !hasPos(t.y)) return '';
                                                 return `M${s.x},${s.y} L${t.x},${t.y}`;
                                         });
 
-                                        linkLabel.attr('x', d => (d.source.x + d.target.x) / 2).attr('y', d => (d.source.y + d.target.y) / 2 - (d.curve ? 10 : 0));
+                                        linkLabel.attr('x', d => {
+                                                const sx = d.source.x, tx = d.target.x;
+                                                if (!hasPos(sx) || !hasPos(tx)) return 0;
+                                                return (sx + tx) / 2;
+                                        }).attr('y', d => {
+                                                const sy = d.source.y, ty = d.target.y;
+                                                if (!hasPos(sy) || !hasPos(ty)) return 0;
+                                                return (sy + ty) / 2 - (d.curve ? 10 : 0);
+                                        });
                                         node.attr('transform', d => `translate(${d.x},${d.y})`);
                                         // Update bundle overlay geometry
                                         try {
@@ -1218,6 +1232,7 @@ function refreshGraphExtentFromNodes(nodes) {
                                                         const sy = (d.kind==='send') ? a.y : c.y;
                                                         const tx = (d.kind==='send') ? c.x : a.x;
                                                         const ty = (d.kind==='send') ? c.y : a.y;
+                                                        if (!hasPos(sx) || !hasPos(sy) || !hasPos(tx) || !hasPos(ty)) return '';
                                                         const mx=(sx+tx)/2, my=(sy+ty)/2, nx=ty-sy, ny=-(tx-sx), nlen=Math.hypot(nx,ny)||1, k=22/nlen, cx=mx+nx*k, cy=my+ny*k;
                                                         return `M${sx},${sy} Q${cx},${cy} ${tx},${ty}`;
                                                 });
@@ -1231,6 +1246,7 @@ function refreshGraphExtentFromNodes(nodes) {
                                                         const t = idMap[d.t] || nodes.find(n => n.id === d.t);
                                                         if (!s || !t) return '';
                                                         const sx=s.x, sy=s.y, tx=t.x, ty=t.y;
+                                                        if (!hasPos(sx) || !hasPos(sy) || !hasPos(tx) || !hasPos(ty)) return '';
                                                         const mx=(sx+tx)/2, my=(sy+ty)/2, nx=ty-sy, ny=-(tx-sx), nlen=Math.hypot(nx,ny)||1, k=18/nlen, cx=mx+nx*k, cy=my+ny*k;
                                                         return `M${sx},${sy} Q${cx},${cy} ${tx},${ty}`;
                                                 });

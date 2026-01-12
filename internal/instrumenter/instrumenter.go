@@ -146,6 +146,58 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 		return false
 	})
 
+	// Inject runtime stop hooks near the top of the transformed main function.
+	if runFn != nil && runFn.Body != nil {
+		pkgName := "gtvtrace"
+		for _, im := range file.Imports {
+			if strings.Trim(im.Path.Value, "\"") == "jspt/internal/gtvtrace" {
+				if im.Name != nil && im.Name.Name != "" {
+					pkgName = im.Name.Name
+				}
+				break
+			}
+		}
+		hasCall := func(fn *ast.FuncDecl, pkg, sel string) bool {
+			found := false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if found {
+					return false
+				}
+				ce, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				se, ok := ce.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				id, ok := se.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if id.Name == pkg && se.Sel != nil && se.Sel.Name == sel {
+					found = true
+					return false
+				}
+				return true
+			})
+			return found
+		}
+		needSignal := !hasCall(runFn, pkgName, "InstallStopOnSignal")
+		needTimeout := !hasCall(runFn, pkgName, "InstallStopAfterFromEnv")
+		if needSignal || needTimeout {
+			ensureImport("jspt/internal/gtvtrace")
+			hooks := []ast.Stmt{}
+			if needSignal {
+				hooks = append(hooks, mkExpr(pkgName+".InstallStopOnSignal()"))
+			}
+			if needTimeout {
+				hooks = append(hooks, mkExpr(pkgName+".InstallStopAfterFromEnv(\"GTV_TIMEOUT_MS\")"))
+			}
+			runFn.Body.List = append(hooks, runFn.Body.List...)
+		}
+	}
+
 	// Propagate ctx to other functions and optionally log roles declared via gtv:role= in doc.
 	for _, d := range file.Decls {
 		fn, ok := d.(*ast.FuncDecl)

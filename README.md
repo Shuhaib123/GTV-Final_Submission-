@@ -73,6 +73,22 @@ Notes:
 - Offline parsing uses the same event processor as live; you can enable `GTV_SYNTH_SEND=1` during `go run .` to synthesize missing sends in JSON too.
 
 
+## Non-Terminating Programs
+
+Instrumented binaries install signal and timeout hooks automatically:
+
+- Ctrl+C (SIGINT) or SIGTERM will stop tracing and flush `trace.out`/`trace.json`.
+- You can force a timed exit without changing workload logic.
+
+Runner timeout flag:
+
+- `go run ./cmd/gtv-runner -workload broadcast -timeout 500ms`
+
+Environment override (advanced):
+
+- `GTV_TIMEOUT_MS=500 go run ./cmd/gtv-runner -workload broadcast`
+
+
 ## How It Works
 
 - `internal/workload` runs a simple ping–pong exchange over channels with `trace.Log` and `trace.WithRegion` annotations.

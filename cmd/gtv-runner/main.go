@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"jspt/internal/gtvtrace"
 	"jspt/internal/workload"
 	"log"
 	"os"
@@ -21,15 +22,19 @@ func main() {
 
 	// Start writing the runtime/trace stream to stdout. The live server reads
 	// ONLY stdout as a binary trace stream. Any textual prints must go to stderr.
-	if err := trace.Start(os.Stdout); err != nil {
+	if err := gtvtrace.Start(os.Stdout); err != nil {
 		log.Fatal(err)
 	}
+	gtvtrace.InstallStopOnSignal()
+	gtvtrace.InstallStopAfterFromEnv("GTV_TIMEOUT_MS")
 	// Redirect all subsequent fmt.Print* and default log output to stderr so
 	// they do not corrupt the binary trace stream on stdout.
 	os.Stdout = os.Stderr
 	log.SetOutput(os.Stderr)
 	log.Printf("gtv-runner: requested workload=%q", *wl)
 	ctx, task := trace.NewTask(context.Background(), strings.Title(*wl))
+	defer gtvtrace.FlushIdempotent()
+	defer gtvtrace.StopIdempotent()
 	done := make(chan struct{})
 	go func() {
 		// Try dynamic workloads first
@@ -64,5 +69,4 @@ func main() {
 		<-done
 	}
 	task.End()
-	trace.Stop()
 }
