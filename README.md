@@ -50,6 +50,7 @@ GTV is a tiny experiment to visualize Go concurrency from runtime traces. It sup
 Environment options:
 - `GTV_SYNTH_SEND=1` — synthesize a send just before any unmatched recv to keep edges complete.
 - `GTV_DROP_BLOCK_NO_CH=1` — drop blocked events that cannot be tied to a channel.
+- `GTV_FILTER_GOROUTINES=legacy` — keep legacy goroutine filtering (only `main.main` + `/workload.`).
 
 Examples:
 - Flags: `go run ./cmd/gtv-live -addr :9090 -synth -drop-block-no-ch`
@@ -71,6 +72,7 @@ Live server env flags:
 
 Trace processor env flags:
 - `GTV_SKIP_PAIRING_CHANNELS` — comma‑separated channel names to skip pairing.
+- `GTV_FILTER_GOROUTINES` — goroutine filter mode: `ops` (default, include `main.main` + goroutines with channel ops), `all` (include everything; unknown roles get `unknown`), or `legacy` (only `main.main` + `/workload.`).
 
 Instrumenter env flags (apply to `gtv-instrument` and the in-browser `/instrument` UI):
 - `GTV_INSTR_GUARD_LABELS`

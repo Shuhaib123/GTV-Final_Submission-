@@ -29,7 +29,11 @@ func WritePingPongTimelineJSON(tracePath, jsonPath string) error {
 	}
 
 	// Use shared processor without live synthesis; allow DropBlockNoCh via env.
-	opts := traceproc.Options{SynthOnRecv: false, DropBlockNoCh: os.Getenv("GTV_DROP_BLOCK_NO_CH") == "1"}
+	opts := traceproc.Options{
+		SynthOnRecv:     false,
+		DropBlockNoCh:   os.Getenv("GTV_DROP_BLOCK_NO_CH") == "1",
+		GoroutineFilter: traceproc.ParseGoroutineFilterMode(os.Getenv("GTV_FILTER_GOROUTINES")),
+	}
 	st := traceproc.NewParseState(opts)
 	var timeline []traceproc.TimelineEvent
 	emit := func(ev traceproc.TimelineEvent) error { timeline = append(timeline, ev); return nil }
