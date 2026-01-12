@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -43,11 +44,47 @@ var (
 	optWorkload string
 	optBCMode   string
 	optLiveLog  bool
+	optTimeout  string
 )
 
 func envBool(name string) bool {
 	v := os.Getenv(name)
 	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+}
+
+func parseTimeoutDuration(raw string) (time.Duration, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+func withTimeoutSignals(cmd *exec.Cmd, timeout time.Duration) {
+	if cmd == nil || cmd.Process == nil || timeout <= 0 {
+		return
+	}
+	grace := 750 * time.Millisecond
+	send := func(sig os.Signal) {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(sig)
+	}
+	go func() {
+		time.Sleep(timeout)
+		send(os.Interrupt)
+		time.Sleep(grace)
+		if runtime.GOOS != "windows" {
+			send(syscall.SIGTERM)
+		}
+		time.Sleep(grace)
+		send(os.Kill)
+	}()
 }
 
 func main() {
@@ -73,6 +110,11 @@ func main() {
 	liveLogDefault := envBool("GTV_LIVE_LOG")
 	bcModeFlag := flag.String("bc-mode", bcModeDefault, "broadcast mode: buffered|blocking")
 	liveLogFlag := flag.Bool("live-log", liveLogDefault, "write trace.live.<run>.json while running")
+	timeoutDefault := os.Getenv("GTV_TIMEOUT")
+	if timeoutDefault == "" {
+		timeoutDefault = "10s"
+	}
+	timeoutFlag := flag.String("timeout", timeoutDefault, "runner timeout (e.g., 2s, 500ms); also sets GTV_TIMEOUT_MS for child")
 	flag.Parse()
 	listenAddr = *addrFlag
 	optSynth = *synthFlag
@@ -80,6 +122,7 @@ func main() {
 	optWorkload = strings.ToLower(*wlFlag)
 	optBCMode = strings.ToLower(*bcModeFlag)
 	optLiveLog = *liveLogFlag
+	optTimeout = strings.TrimSpace(*timeoutFlag)
 
 	// Serve static assets from ./web
 	fs := http.FileServer(http.Dir("web"))
@@ -219,7 +262,16 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	bcModeQ := r.URL.Query().Get("bc_mode")
 	timeoutQ := strings.TrimSpace(r.URL.Query().Get("timeout"))
 	if timeoutQ == "" {
-		timeoutQ = "4s"
+		if optTimeout != "" {
+			timeoutQ = optTimeout
+		} else {
+			timeoutQ = "4s"
+		}
+	}
+	timeoutDur, timeoutOK := parseTimeoutDuration(timeoutQ)
+	var timeoutMS string
+	if timeoutOK {
+		timeoutMS = strconv.FormatInt(int64(timeoutDur/time.Millisecond), 10)
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), runJSONTimeout)
 	defer cancel()
@@ -250,6 +302,9 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		env = append(env, "GTV_BC_MODE=blocking")
 	}
+	if timeoutMS != "" {
+		env = append(env, "GTV_TIMEOUT_MS="+timeoutMS)
+	}
 	cmd.Env = env
 	// Capture stderr so we can surface build/runtime errors back to the client
 	var errBuf strings.Builder
@@ -262,6 +317,9 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := cmd.Start(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "runner start: "+err.Error())
 		return
+	}
+	if timeoutOK {
+		withTimeoutSignals(cmd, timeoutDur)
 	}
 	// Tee raw trace bytes to trace.out while parsing.
 	outFile, err := os.Create("trace.out")
@@ -713,9 +771,25 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 	// Use a modest timeout for live runs to avoid hanging sessions
 	// Always pass a single workload-specific tag; files without build tags are still compiled.
 	tagName := "workload_" + wl
-	cmd := exec.Command("go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", wl, "-timeout", "10s")
+	timeoutStr := optTimeout
+	if timeoutStr == "" {
+		timeoutStr = "10s"
+	}
+	timeoutDur, timeoutOK := parseTimeoutDuration(timeoutStr)
+	timeoutMS := ""
+	if timeoutOK {
+		timeoutMS = strconv.FormatInt(int64(timeoutDur/time.Millisecond), 10)
+	}
+	cmd := exec.Command("go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", wl, "-timeout", timeoutStr)
+	env := os.Environ()
 	if bcMode != "" {
-		cmd.Env = append(os.Environ(), "GTV_BC_MODE="+strings.ToLower(bcMode))
+		env = append(env, "GTV_BC_MODE="+strings.ToLower(bcMode))
+	}
+	if timeoutMS != "" {
+		env = append(env, "GTV_TIMEOUT_MS="+timeoutMS)
+	}
+	if len(env) > 0 {
+		cmd.Env = env
 	}
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
@@ -724,6 +798,9 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 	}
 	if err := cmd.Start(); err != nil {
 		return err
+	}
+	if timeoutOK {
+		withTimeoutSignals(cmd, timeoutDur)
 	}
 	// Tee raw trace bytes to trace.out while parsing.
 	outFile, err := os.Create("trace.out")

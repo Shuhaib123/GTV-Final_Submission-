@@ -358,9 +358,19 @@
       function format(ms) {
         return ms.toFixed(3);
       }
+      function isFiniteNumber(v) {
+        return Number.isFinite(v);
+      }
       let labelOffset = 18,
         edgeCurve = 40;
       function pathForEdge(x1, y1, x2, y2) {
+        if (
+          !isFiniteNumber(x1) ||
+          !isFiniteNumber(y1) ||
+          !isFiniteNumber(x2) ||
+          !isFiniteNumber(y2)
+        )
+          return "";
         if (edgeCurve <= 0) return `M ${x1} ${y1} L ${x2} ${y2}`;
         const dx = x2 - x1,
           dy = y2 - y1;
@@ -382,6 +392,13 @@
         return e;
       }
       function pathForCurve(x1, y1, x2, y2, off = 22) {
+        if (
+          !isFiniteNumber(x1) ||
+          !isFiniteNumber(y1) ||
+          !isFiniteNumber(x2) ||
+          !isFiniteNumber(y2)
+        )
+          return "";
         const dx = x2 - x1,
           dy = y2 - y1,
           len = Math.hypot(dx, dy) || 1;
@@ -751,6 +768,13 @@
           const y1 = kind === "send" ? a.y : target.y;
           const x2 = kind === "send" ? target.x : a.x;
           const y2 = kind === "send" ? target.y : a.y;
+          if (
+            !isFiniteNumber(x1) ||
+            !isFiniteNumber(y1) ||
+            !isFiniteNumber(x2) ||
+            !isFiniteNumber(y2)
+          )
+            return;
           const p = document.createElementNS(
             "http://www.w3.org/2000/svg",
             "path"
@@ -767,6 +791,17 @@
           ay = e.a.y,
           bx = e.b.x,
           by = e.b.y;
+        if (
+          !isFiniteNumber(ax) ||
+          !isFiniteNumber(ay) ||
+          !isFiniteNumber(bx) ||
+          !isFiniteNumber(by)
+        ) {
+          e.path.setAttribute("d", "");
+          e.label.setAttribute("x", 0);
+          e.label.setAttribute("y", 0);
+          return;
+        }
         // Update the path with per-edge curvature to fan out siblings
         const dx = bx - ax,
           dy = by - ay;
