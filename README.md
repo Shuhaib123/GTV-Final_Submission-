@@ -11,34 +11,90 @@ It includes an instrumenter, a shared trace processor, and two graph viewers wit
 
 ```mermaid
 
+
+
 flowchart LR
-  A[Go Program / Workload] --> B[Optional Instrumentation\ninternal/instrumenter]
-  A --> C[Run Go Binary]
+  %% =========================
+  %% Top-level execution path
+  %% =========================
+  A[Go Workload Source<br/>existing program / generated workload / instrumented program]
+
+  B[Instrumentation<br/>optional but recommended<br/>internal/instrumenter]
+
+  C[Run Go Binary]
+
+  A --> B
+  A --> C
   B --> C
 
-  C --> D[runtime/trace stream]
-  C --> E[trace.out]
+  %% Outputs from execution
+  C --> D[runtime/trace live stream]
+  C --> E[trace.out file]
 
-  D --> F[Live Processing\ncmd/gtv-live + internal/traceproc]
-  E --> G[Offline Processing\nmain.go + parser.go + internal/traceproc]
+  %% =========================
+  %% Offline path
+  %% =========================
+  subgraph OFF[Offline Path (Post-Mortem Replay)]
+    direction LR
 
-  F --> H[WebSocket JSON envelopes\n(events + entities)]
-  G --> I[trace.json\n(events + entities)]
+    G[Offline Trace Processing<br/>internal/traceproc]
 
-  H --> J[Shared Topology Builder\nweb/shared/topology-builder.js]
+    I[trace.json<br/>events + entities + metadata]
+
+    L[Offline Graph Viewer<br/>web/pages/graph]
+
+    E --> G
+    G --> I
+  end
+
+  %% =========================
+  %% Live path
+  %% =========================
+  subgraph LIVE[Live Path (Real-Time Streaming)]
+    direction LR
+
+    F[Live Trace Reader + Stream Processing<br/>x/exp/trace.Reader + internal/traceproc]
+
+    H[Normalized live events/entities<br/>JSON envelope over WebSocket]
+
+    K[Live Graph Viewer<br/>web/pages/graph-live]
+
+    D --> F
+    F --> H
+  end
+
+  %% =========================
+  %% Shared frontend topology
+  %% =========================
+  J[Shared Topology Builder<br/>web/shared/topology-builder.js]
+
   I --> J
+  H --> J
 
-  J --> K[Live Graph Viewer\nweb/pages/graph-live]
-  J --> L[Offline Graph Viewer\nweb/pages/graph]
+  J --> L
+  J --> K
 
-  J --> M[Topology Narration\n(formation-only summary)]
+  %% =========================
+  %% Viewer-side derived features
+  %% =========================
+  M[Topology Narration / Structural Summary]
 
-  subgraph Semantics
-    N[Spawn layer: parent g -> child g]
-    O[Create edges: goroutine -> channel/resource]
-    P[Channel layer: send/recv]
-    Q[Sync layer: lock/unlock/wg/cond]
-    R[Causal layer: optional overlay]
+  V[Shared Viewer Features<br/>Topology narration<br/>Sync / layer filters<br/>Causal overlays<br/>Debug / teach modes]
+
+  J -.-> M
+  V -.-> L
+  V -.-> K
+
+  %% =========================
+  %% Semantics / structural layers
+  %% =========================
+  subgraph S[Graph Semantics / Structural Layers]
+    direction TB
+    N[spawn: parent goroutine -> child goroutine]
+    O[channel layer: send / recv]
+    P[sync layer: lock / unlock / wg / cond]
+    Q[causal layer: optional overlay]
+    R[resource interaction / creation edges]
   end
 
   J --- N
@@ -46,6 +102,27 @@ flowchart LR
   J --- P
   J --- Q
   J --- R
+
+  %% =========================
+  %% Optional styling
+  %% =========================
+  classDef source fill:#f3f4f6,stroke:#9ca3af,color:#111827,stroke-width:1px;
+  classDef optional fill:#f59e0b,stroke:#b45309,color:#ffffff,stroke-width:1px;
+  classDef exec fill:#14b8a6,stroke:#0f766e,color:#ffffff,stroke-width:1px;
+  classDef offline fill:#facc15,stroke:#ca8a04,color:#111827,stroke-width:1px;
+  classDef live fill:#d9f99d,stroke:#65a30d,color:#111827,stroke-width:1px;
+  classDef topology fill:#2dd4bf,stroke:#0f766e,color:#ffffff,stroke-width:1px;
+  classDef viewer fill:#e9d5ff,stroke:#8b5cf6,color:#111827,stroke-width:1px;
+  classDef feature fill:#f8fafc,stroke:#94a3b8,color:#111827,stroke-dasharray: 4 3;
+  classDef semantic fill:#f8fafc,stroke:#94a3b8,color:#111827,stroke-dasharray: 4 3;
+
+  class A source;
+  class B optional;
+  class C,J exec;
+  class G,I offline;
+  class F,H live;
+  class K,L viewer;
+  class M,V,N,O,P,Q,R feature;
 
 
   ```
