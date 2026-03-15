@@ -10,40 +10,42 @@ It includes an instrumenter, a shared trace processor, and two graph viewers wit
 ## Current Pipeline
 
 ```mermaid
-flowchart LR
-  A[Go workload source] --> B[Instrumenter\n(optional but recommended)\ninternal/instrumenter]
-  B --> C[Run instrumented binary]
 
-  C --> D[runtime/trace stream]
+flowchart LR
+  A[Go Workload Source] --> B[Instrumentation<br/>optional but recommended<br/>internal/instrumenter]
+  A --> C[Run Go Binary]
+  B --> C
+
+  C --> D[runtime/trace live stream]
   C --> E[trace.out file]
 
-  D --> F[Live parser\ncmd/gtv-live + internal/traceproc]
-  E --> G[Offline parser\ninternal/traceproc]
+  D --> F[Live Trace Reader + Stream Processing<br/>x/exp/trace.Reader + internal/traceproc]
+  E --> G[Offline Trace Processing<br/>internal/traceproc]
 
-  F --> H[Normalized events/entities\n(JSON envelope over WebSocket)]
-  G --> I[trace.json\n(events + entities)]
+  F --> H[Normalized live events/entities<br/>JSON envelope over WebSocket]
+  G --> I[trace.json<br/>events + entities + metadata]
 
-  H --> J[Topology Builder\nweb/shared/topology-builder.js]
+  H --> J[Shared Topology Builder<br/>web/shared/topology-builder.js]
   I --> J
 
-  J --> K[Live Graph\nweb/pages/graph-live]
-  J --> L[Offline Graph\nweb/pages/graph]
+  J --> K[Live Graph Viewer<br/>web/pages/graph-live]
+  J --> L[Offline Graph Viewer<br/>web/pages/graph]
+  J --> M[Topology Narration / Structural Summary]
 
-  J --> M[Topology Narration\nformation-only summary]
-
-  subgraph Semantics["Semantics"]
-    N[create: goroutine -> channel/resource]
-    O[spawn: parent goroutine -> child goroutine]
-    P[channel layer: send/recv]
-    Q[sync layer: lock/unlock/wg/cond]
-    R[causal layer: optional overlay]
+  subgraph S[Graph Semantics / Structural Layers]
+    N[spawn: parent goroutine -> child goroutine]
+    O[channel layer: send / recv]
+    P[sync layer: lock / unlock / wg / cond]
+    Q[causal layer: optional overlay]
+    R[resource interaction / creation edges]
   end
 
-  J --> N
-  J --> O
-  J --> P
-  J --> Q
-  J --> R
+  J --- N
+  J --- O
+  J --- P
+  J --- Q
+  J --- R
+
   ```
 
 
