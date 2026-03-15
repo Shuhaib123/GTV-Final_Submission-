@@ -8,6 +8,7 @@ GTV visualizes Go concurrency from `runtime/trace` in two modes:
 It includes an instrumenter, a shared trace processor, and two graph viewers with synchronization-aware topology.
 
 ## Current Pipeline
+
 ```mermaid
 flowchart LR
   A[Go workload source] --> B[Instrumenter\n(optional but recommended)\ninternal/instrumenter]
@@ -30,7 +31,7 @@ flowchart LR
 
   J --> M[Topology Narration\nformation-only summary]
 
-  subgraph Semantics
+  subgraph Semantics["Semantics"]
     N[create: goroutine -> channel/resource]
     O[spawn: parent goroutine -> child goroutine]
     P[channel layer: send/recv]
@@ -38,12 +39,12 @@ flowchart LR
     R[causal layer: optional overlay]
   end
 
-  J --- N
-  J --- O
-  J --- P
-  J --- Q
-  J --- R
-```
+  J --> N
+  J --> O
+  J --> P
+  J --> Q
+  J --> R
+
 
 ## What Is Current
 
