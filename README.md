@@ -1,19 +1,32 @@
 # Go Trace Visualizer (GTV)
 
-## Summary
+## Overview
 
-**Go Trace Visualizer (GTV)** is a synchronization-aware visualization, topology reconstruction and analysis system for Go concurrency. It instruments workloads, processes `runtime/trace` data through a shared semantic pipeline, and renders execution as a layered topology in both live and offline viewers.
+**Go Trace Visualizer (GTV)** is a concurrency visualization and analysis system for Go programs built on top of `runtime/trace`.
 
-Its core strengths are:
+It helps developers, students, and instructors understand how concurrent Go programs behave by transforming trace data into a semantic, graph-oriented view of execution. Rather than exposing only low-level runtime events, GTV organizes behavior into meaningful concurrency structures such as:
 
-* a dual live/offline replay model
-* first-class synchronization handling
-* shared trace processing logic
-* instrumentation-aware workload generation
-* teaching-friendly and debug-friendly views
-* browser-based topology exploration with narration and filtering
+* goroutine creation and relationships
+* channel creation and communication flow
+* synchronization interactions
+* blocking and waiting behavior
+* causal and topology overlays
 
-In short, GTV is a project for making concurrent Go execution easier to **see, explain, and debug**.
+GTV supports two primary operating modes:
+
+* **Live replay**, where trace data is processed and streamed incrementally over WebSocket while the program runs
+* **Offline replay**, where a completed `trace.out` file is converted into `trace.json` and explored after execution
+
+The project combines several subsystems into one end-to-end workflow:
+
+* a Go source instrumenter
+* a shared trace processor
+* a live HTTP/WebSocket server
+* an offline parser
+* browser-based graph viewers
+* shared topology-building and narration logic
+
+This makes GTV useful both as a **teaching tool for Go concurrency** and as a **debugging tool for synchronization-heavy workloads**.
 
 ---
 
@@ -61,37 +74,6 @@ In short, GTV is a project for making concurrent Go execution easier to **see, e
 * [Troubleshooting](#troubleshooting)
 * [Repository Notes](#repository-notes)
 * [Who This Project Is For](#who-this-project-is-for)
-* [Summary](#summary)
-
----
-
-## Overview
-
-**Go Trace Visualizer (GTV)** is a concurrency visualization and analysis system for Go programs built on top of `runtime/trace`.
-
-It helps developers, students, and instructors understand how concurrent Go programs behave by transforming trace data into a semantic, graph-oriented view of execution. Rather than exposing only low-level runtime events, GTV organizes behavior into meaningful concurrency structures such as:
-
-* goroutine creation and relationships
-* channel creation and communication flow
-* synchronization interactions
-* blocking and waiting behavior
-* causal and topology overlays
-
-GTV supports two primary operating modes:
-
-* **Live replay**, where trace data is processed and streamed incrementally over WebSocket while the program runs
-* **Offline replay**, where a completed `trace.out` file is converted into `trace.json` and explored after execution
-
-The project combines several subsystems into one end-to-end workflow:
-
-* a Go source instrumenter
-* a shared trace processor
-* a live HTTP/WebSocket server
-* an offline parser
-* browser-based graph viewers
-* shared topology-building and narration logic
-
-This makes GTV useful both as a **teaching tool for Go concurrency** and as a **debugging tool for synchronization-heavy workloads**.
 
 ---
 
@@ -127,7 +109,7 @@ GTV currently provides the following major capabilities:
 
 * **Live replay over WebSocket**
 * **Offline replay from `trace.json`**
-* **Optional source instrumentation**
+* **Required source instrumentation (trace annotations)**
 * **Shared trace normalization through `internal/traceproc`**
 * **Synchronization-aware topology construction**
 * **Layered graph rendering**
@@ -162,7 +144,7 @@ The repository reflects a newer structure and a more mature architecture than a 
 
 ```mermaid
 flowchart LR
-  A["Go Workload Source"] --> B["Instrumentation (optional)<br/>internal/instrumenter"]
+  A["Go Workload Source"] --> B["Instrumentation (required)<br/>internal/instrumenter"]
   A --> C["Run Go Binary"]
   B --> C
 
@@ -238,7 +220,7 @@ flowchart LR
 
 At a high level, GTV turns runtime trace data into a graph-oriented concurrency model.
 
-A Go workload may optionally be instrumented first. It is then executed under tracing. Depending on the selected mode, events are either streamed live or parsed after the run. In both cases, a shared trace processor normalizes and enriches events before they are rendered in the browser.
+A Go workload is instrumented first (required). It is then executed under tracing. Depending on the selected mode, events are either streamed live or parsed after the run. In both cases, a shared trace processor normalizes and enriches events before they are rendered in the browser.
 
 ### Live Replay Pipeline
 
@@ -382,7 +364,51 @@ The repo also includes supporting docs such as:
 
 ---
 
+## Repository and Setup
+
+### Requirements
+
+You need:
+
+* **Go** (a recent version compatible with this repo)
+* **Node.js** (for running the frontend-side tests and shared JS utilities)
+* A local environment where you can run a web server on **localhost:8080**
+
+> Note: This project relies on **trace annotations** added by the instrumenter. Instrumentation is **required** so that traces contain the structured regions/logs/tasks needed for topology construction and sync analysis.
+
+### Dependencies
+
+Go module dependencies are managed via `go.mod`:
+
+```bash
+go mod download
+```
+
+(Optional) If you want to run the JavaScript tests under `web/shared/*`, install Node dependencies if your local workflow requires them:
+
+```bash
+# Only if your environment expects a package install step.
+# Some repos run these tests directly with Node without extra deps.
+npm install
+```
+
+### Clone and run (typical)
+
+```bash
+git clone <REPO_URL>
+cd <REPO_DIR>
+go mod download
+```
+
+If you are working on a local copy without a remote URL, skip the clone step and run `go mod download` inside the repository.
+
+
+---
+
 ## Quick Start
+
+
+GTV runs as a local Go server that hosts the web UI pages under `web/pages/*` and streams/serves trace-derived data.
 
 ## Live Mode
 
@@ -482,7 +508,7 @@ Depending on the repo snapshot, there may also be an additional project-facing p
 
 ## Instrumentation Workflows
 
-Instrumentation is one of the core value-adds of the project. It enriches workloads so that the resulting traces are more useful for topology construction and synchronization analysis.
+Instrumentation is one of the core value-adds of the project and is required. It enriches workloads with trace annotations so that the resulting traces are more useful for topology construction and synchronization analysis.
 
 ### Browser Instrumentation Flow
 
@@ -805,6 +831,3 @@ Developers debugging blocking, pairing ambiguity, synchronization issues, or exe
 Researchers and engineers interested in trace-driven program understanding or semantic concurrency visualization can use the codebase as a practical reference point.
 
 ---
-
-
-
