@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Go Trace Visualizer (GTV)** is a synchronization-aware visualization and analysis system for Go concurrency. It instruments workloads, processes `runtime/trace` data through a shared semantic pipeline, and renders execution as a layered topology in both live and offline viewers.
+**Go Trace Visualizer (GTV)** is a synchronization-aware visualization, topology reconstruction and analysis system for Go concurrency. It instruments workloads, processes `runtime/trace` data through a shared semantic pipeline, and renders execution as a layered topology in both live and offline viewers.
 
 Its core strengths are:
 
