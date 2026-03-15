@@ -12,32 +12,33 @@ It includes an instrumenter, a shared trace processor, and two graph viewers wit
 ```mermaid
 
 flowchart LR
-  A[Go Workload Source] --> B[Instrumentation<br/>optional but recommended<br/>internal/instrumenter]
+  A[Go Program / Workload] --> B[Optional Instrumentation\ninternal/instrumenter]
   A --> C[Run Go Binary]
   B --> C
 
-  C --> D[runtime/trace live stream]
-  C --> E[trace.out file]
+  C --> D[runtime/trace stream]
+  C --> E[trace.out]
 
-  D --> F[Live Trace Reader + Stream Processing<br/>x/exp/trace.Reader + internal/traceproc]
-  E --> G[Offline Trace Processing<br/>internal/traceproc]
+  D --> F[Live Processing\ncmd/gtv-live + internal/traceproc]
+  E --> G[Offline Processing\nmain.go + parser.go + internal/traceproc]
 
-  F --> H[Normalized live events/entities<br/>JSON envelope over WebSocket]
-  G --> I[trace.json<br/>events + entities + metadata]
+  F --> H[WebSocket JSON envelopes\n(events + entities)]
+  G --> I[trace.json\n(events + entities)]
 
-  H --> J[Shared Topology Builder<br/>web/shared/topology-builder.js]
+  H --> J[Shared Topology Builder\nweb/shared/topology-builder.js]
   I --> J
 
-  J --> K[Live Graph Viewer<br/>web/pages/graph-live]
-  J --> L[Offline Graph Viewer<br/>web/pages/graph]
-  J --> M[Topology Narration / Structural Summary]
+  J --> K[Live Graph Viewer\nweb/pages/graph-live]
+  J --> L[Offline Graph Viewer\nweb/pages/graph]
 
-  subgraph S[Graph Semantics / Structural Layers]
-    N[spawn: parent goroutine -> child goroutine]
-    O[channel layer: send / recv]
-    P[sync layer: lock / unlock / wg / cond]
-    Q[causal layer: optional overlay]
-    R[resource interaction / creation edges]
+  J --> M[Topology Narration\n(formation-only summary)]
+
+  subgraph Semantics
+    N[Spawn layer: parent g -> child g]
+    O[Create edges: goroutine -> channel/resource]
+    P[Channel layer: send/recv]
+    Q[Sync layer: lock/unlock/wg/cond]
+    R[Causal layer: optional overlay]
   end
 
   J --- N
@@ -45,6 +46,7 @@ flowchart LR
   J --- P
   J --- Q
   J --- R
+
 
   ```
 
