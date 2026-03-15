@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GTV — Demo</title>
+  <link rel="stylesheet" href="../../shared/base.css" />
+  <link rel="stylesheet" href="./demo.css?v=20260216-1" />
+  <script src="../../shared/ui.js" defer></script>
+  <script src="./demo.js?v=20260216-1" defer></script>
+</head>
+<body>
+  <header class="gtv-nav">
+    <div class="container inner">
+      <a class="gtv-brand" href="../index/index.html" aria-label="Go Trace Visualizer Home">
+        <div class="gtv-logo" aria-hidden="true"></div>
+        <div>
+          <div class="gtv-brand-title">Go Trace Visualizer</div>
+          <div class="gtv-brand-sub">PingPong demo</div>
+        </div>
+      </a>
+      <nav class="gtv-navlinks" aria-label="Primary">
+        <a class="gtv-link" href="../index/index.html">Home</a>
+        <a class="gtv-link" href="../instrument/instrument.html">Start</a>
+        <a class="gtv-link" href="../project/project.html">Project GTV</a>
+      </nav>
+      <div class="gtv-navactions">
+        <button class="btn ghost" type="button" data-gtv-theme-toggle>Theme</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="gtv-page demo-wrap">
+    <div class="container">
+      <div class="card pad demo-card">
+        <div class="kicker"><span class="kdot" aria-hidden="true"></span>Stored demo run</div>
+        <h2 style="margin:10px 0 8px">PingPong replay</h2>
+        <p class="muted demo-lead">
+          This demo replays a pre-recorded event stream. Use the close (×) button in the viewer to return here.
+        </p>
+
+        <div class="demo-actions">
+          <button id="btnGoTrace" class="btn primary" type="button">Demo Go Trace UI</button>
+          <a class="btn primary" href="../graph-live/graph-live.html?mode=demo&src=/pages/demo/data/pingpong.json&autoplay=1&return=../demo/demo.html">Demo Live Graph</a>
+          <a class="btn primary" href="../graph/graph.html?mode=demo&src=/pages/demo/data/pingpong.json&return=../demo/demo.html">Demo Offline Graph</a>
+        </div>
+        <div id="goTraceStatus" class="mini demo-status" role="status" aria-live="polite"></div>
+
+        <div class="hr"></div>
+        <div class="mini demo-footnote">
+          If you replace <code>/pages/demo/data/pingpong.json</code> with your own recorded run, the demo buttons will replay it without changing any code.
+        </div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

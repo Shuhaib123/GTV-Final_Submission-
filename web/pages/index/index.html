@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GTV — Go Trace Visualizer</title>
+  <link rel="stylesheet" href="../../shared/base.css" />
+  <link rel="stylesheet" href="./index.css" />
+  <script src="../../shared/ui.js" defer></script>
+</head>
+<body>
+  <header class="gtv-nav">
+    <div class="container inner">
+      <a class="gtv-brand" href="index.html" aria-label="Go Trace Visualizer Home">
+        <div class="gtv-logo" aria-hidden="true"></div>
+        <div>
+          <div class="gtv-brand-title">Go Trace Visualizer</div>
+          <div class="gtv-brand-sub">Sova-inspired UI skin</div>
+        </div>
+      </a>
+      <div class="gtv-navactions">
+        <button class="btn ghost" type="button" data-gtv-theme-toggle>Theme</button>
+        <a class="btn" href="../demo/demo.html">Demo</a>
+        <a class="btn primary" href="../instrument/instrument.html">Start</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="gtv-page">
+    <section class="hero hero--center">
+      <div class="container">
+        <div class="hero-stack">
+          <div class="cta-grid" role="list">
+            <a class="cta-card" role="listitem" href="../instrument/instrument.html">
+              <div class="cta-icon" aria-hidden="true">▶</div>
+              <div>
+                <div class="cta-title">Start</div>
+                <div class="cta-sub">Instrument a workload and run it.</div>
+              </div>
+            </a>
+            <a class="cta-card" role="listitem" href="../demo/demo.html">
+              <div class="cta-icon" aria-hidden="true">◆</div>
+              <div>
+                <div class="cta-title">Demo</div>
+                <div class="cta-sub">Open the stored PingPong demo.</div>
+              </div>
+            </a>
+            <a class="cta-card" role="listitem" href="../project/project.html">
+              <div class="cta-icon" aria-hidden="true">◎</div>
+              <div>
+                <div class="cta-title">Project GTV</div>
+                <div class="cta-sub">What it does, how it works, and limits.</div>
+              </div>
+            </a>
+          </div>
+          <p class="muted hero-lead hero-lead-center">
+            Instrument your own Go program, or explore the PingPong demo in live and offline modes.
+          </p>
+
+        </div>
+
+      </div>
+    </section>
+  </main>
+  <!-- footer removed -->
+</body>
+</html>

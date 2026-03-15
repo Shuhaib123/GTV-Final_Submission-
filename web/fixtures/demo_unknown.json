@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "events": [
+    { "time_ms": 1, "time_ns": 1000000, "event": "chan_send", "g": 1, "channel": "", "channel_key": "", "role": "main", "source": "region", "seq": 1, "unknown_sender": true },
+    { "time_ms": 2, "time_ns": 2000000, "event": "chan_recv", "g": 2, "channel": "", "channel_key": "", "role": "worker", "source": "region", "seq": 2, "unknown_receiver": true }
+  ],
+  "entities": {
+    "goroutines": [
+      { "gid": 1, "role": "main", "func": "main.main" },
+      { "gid": 2, "role": "worker", "func": "worker.run" }
+    ]
+  }
+}

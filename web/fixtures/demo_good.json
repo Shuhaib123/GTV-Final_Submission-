@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "events": [
+    { "time_ms": 1, "time_ns": 1000000, "event": "chan_make", "g": 1, "channel": "ping", "channel_key": "ping", "role": "main", "source": "log", "seq": 1, "cap": 0, "elem_type": "int" },
+    { "time_ms": 2, "time_ns": 2000000, "event": "chan_make", "g": 1, "channel": "pong", "channel_key": "pong", "role": "main", "source": "log", "seq": 2, "cap": 0, "elem_type": "int" },
+    { "time_ms": 3, "time_ns": 3000000, "event": "chan_send", "g": 1, "channel": "ping", "channel_key": "ping", "role": "main", "source": "paired", "seq": 3, "msg_id": 1 },
+    { "time_ms": 4, "time_ns": 4000000, "event": "chan_recv", "g": 2, "peer_g": 1, "channel": "ping", "channel_key": "ping", "role": "worker", "source": "paired", "seq": 4, "pair_id": "p1" },
+    { "time_ms": 5, "time_ns": 5000000, "event": "chan_send", "g": 2, "channel": "pong", "channel_key": "pong", "role": "worker", "source": "paired", "seq": 5, "msg_id": 2 },
+    { "time_ms": 6, "time_ns": 6000000, "event": "chan_recv", "g": 1, "peer_g": 2, "channel": "pong", "channel_key": "pong", "role": "main", "source": "paired", "seq": 6, "pair_id": "p2" }
+  ],
+  "entities": {
+    "goroutines": [
+      { "gid": 1, "role": "main", "func": "main.main" },
+      { "gid": 2, "role": "worker", "func": "worker.run" }
+    ],
+    "channels": [
+      { "chan_id": "ping", "name": "ping", "elem_type": "int", "cap": 0 },
+      { "chan_id": "pong", "name": "pong", "elem_type": "int", "cap": 0 }
+    ]
+  }
+}

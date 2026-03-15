@@ -1,0 +1,364 @@
+/* GTV UI Theme — Sova-inspired (dark-first) */
+:root{
+  --bg0:#060818;
+  --bg1:#071126;
+  --bg2:#0b1836;
+  --panel:#0d1731;
+  --panel2:#0b142b;
+  --border:rgba(255,255,255,.10);
+  --border2:rgba(255,255,255,.06);
+  --shadow:0 12px 30px rgba(0,0,0,.35);
+
+  --fg:#eaf1ff;
+  --muted:#a4b3d4;
+  --muted2:#7f93bd;
+
+  --accent:#4ea1ff;
+  --accent2:#7b61ff;
+  --accent3:#2de3ff;
+
+  /* Graph palette (used by current renderers) */
+  --main: #4ea1ff;
+  --worker: #7ee787;
+  --chan: #f6c453;
+  --cluster: #8b5cf6;
+  --edge-send: #22d3ee;
+  --edge-recv: #f97316;
+  --role-coordinator: #4ea1ff;
+  --role-producer: #22c55e;
+  --role-consumer: #fb7185;
+  --role-unknown: #64748b;
+  --sync-mutex: #ef4444;
+  --sync-rwmutex: #f59e0b;
+  --sync-waitgroup: #14b8a6;
+  --sync-cond: #a855f7;
+  --sync-context: #38bdf8;
+  --blocked: #ff6b8a;
+
+
+  --success:#7ee787;
+  --warn:#f6c453;
+  --danger:#ff6b8a;
+
+  --radius-xl:18px;
+  --radius-lg:14px;
+  --radius:12px;
+  --radius-sm:10px;
+
+  --font: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  --container: 1180px;
+  --nav-h: 72px;
+}
+
+/* Glass close button used by viewers */
+.gtv-close{
+  position:fixed;
+  top:14px;
+  left:14px;
+  width:40px;
+  height:40px;
+  border-radius:999px;
+  display:grid;
+  place-items:center;
+  text-decoration:none;
+  color:var(--fg);
+  background: rgba(255,255,255,.08);
+  border:1px solid rgba(255,255,255,.16);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+  z-index:9999;
+  user-select:none;
+}
+.gtv-close:hover{transform:translateY(-1px);border-color:rgba(255,255,255,.24)}
+.gtv-close:active{transform:translateY(0)}
+
+/* Light theme toggle used by existing pages */
+html.theme-light{
+  --bg0:#f7f9ff;
+  --bg1:#edf2ff;
+  --bg2:#e8eeff;
+  --panel:#ffffff;
+  --panel2:#ffffff;
+  --border:rgba(6,14,30,.12);
+  --border2:rgba(6,14,30,.08);
+  --shadow:0 12px 30px rgba(6,14,30,.10);
+
+  --fg:#0a1230;
+  --muted:#4a5a7c;
+  --muted2:#6a7aa4;
+
+  --accent:#1a6bff;
+  --accent2:#6b4bff;
+  --accent3:#00b5ff;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font:14px/1.5 var(--font);
+  color:var(--fg);
+  background:
+    radial-gradient(1200px 700px at 20% -10%, rgba(78,161,255,.30), transparent 60%),
+    radial-gradient(900px 600px at 95% 15%, rgba(123,97,255,.24), transparent 55%),
+    radial-gradient(800px 500px at 40% 110%, rgba(45,227,255,.14), transparent 55%),
+    linear-gradient(180deg, var(--bg0), var(--bg1) 55%, var(--bg0));
+  overflow-x:hidden;
+}
+
+/* subtle grid */
+body::before{
+  content:"";
+  position:fixed;
+  inset:0;
+  pointer-events:none;
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,.05) 1px, transparent 1px);
+  background-size: 72px 72px;
+  opacity:.08;
+}
+html.theme-light body::before{opacity:.10; background-image:
+  linear-gradient(to right, rgba(10,18,48,.10) 1px, transparent 1px),
+  linear-gradient(to bottom, rgba(10,18,48,.10) 1px, transparent 1px);
+}
+
+a{color:inherit; text-decoration:none}
+a:hover{opacity:.92}
+
+.container{max-width:1200px; margin:0 auto; padding:0 24px}
+.container-wide{max-width:1440px; margin:0 auto; padding:0 24px}
+body:not(.graph-page) .container,
+body:not(.graph-page) .container-wide{
+  padding-left: clamp(20px, 3vw, 48px);
+  padding-right: clamp(20px, 3vw, 48px);
+}
+
+/* Navbar */
+.gtv-nav{
+  position:sticky;
+  top:0;
+  /* Keep navbar above full-screen SVG canvases and fixed HUD layers */
+  z-index:200;
+  height:var(--nav-h);
+  display:flex;
+  align-items:center;
+  /* More opaque than before so it doesn't visually "disappear" over busy graphs */
+  background: color-mix(in srgb, var(--bg0) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom:1px solid var(--border2);
+}
+.gtv-nav .inner{display:flex; align-items:center; justify-content:space-between; gap:18px; width:100%}
+.gtv-brand{display:flex; align-items:center; gap:10px; min-width:220px}
+.gtv-logo{
+  width:34px; height:34px; border-radius:10px;
+  background: radial-gradient(circle at 30% 25%, var(--accent3), var(--accent2) 55%, rgba(0,0,0,0) 70%),
+              linear-gradient(135deg, rgba(78,161,255,.65), rgba(123,97,255,.65));
+  box-shadow: 0 0 0 1px var(--border), 0 12px 26px rgba(0,0,0,.25);
+}
+.gtv-brand-title{font-weight:700; letter-spacing:.2px}
+.gtv-brand-sub{font-size:12px; color:var(--muted); margin-top:1px}
+
+.gtv-navlinks{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
+.gtv-link{
+  padding:10px 12px;
+  border-radius:999px;
+  color:var(--muted);
+  border:1px solid transparent;
+}
+.gtv-link:hover{color:var(--fg); background:rgba(255,255,255,.06); border-color:var(--border2)}
+.gtv-link.active{color:var(--fg); background:rgba(78,161,255,.14); border-color:rgba(78,161,255,.35)}
+
+.gtv-navactions{display:flex; align-items:center; gap:10px}
+.gtv-navactions .btn{font-size:14px}
+.gtv-link{font-size:14px}
+
+/* Buttons */
+.btn{
+  appearance:none;
+  border:1px solid var(--border);
+  background: rgba(255,255,255,.10);
+  color:var(--fg);
+  border-radius:999px;
+  padding:10px 14px;
+  font-weight:600;
+  cursor:pointer;
+  transition: transform .12s ease, background .12s ease, border-color .12s ease;
+  backdrop-filter: blur(12px);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.2;
+}
+.btn:hover{transform: translateY(-1px); background:rgba(255,255,255,.08)}
+.btn:active{transform: translateY(0px)}
+.btn:disabled{opacity:.55; cursor:not-allowed; transform:none}
+
+html.theme-light .btn{
+  background: rgba(255,255,255,.65);
+  border-color: rgba(10,18,48,.12);
+  color: var(--fg);
+}
+html.theme-light .btn.primary{
+  border-color: rgba(26,107,255,.45);
+  background: linear-gradient(135deg, rgba(26,107,255,.20), rgba(107,75,255,.16));
+}
+
+.btn.primary{
+  border-color: rgba(78,161,255,.55);
+  background: linear-gradient(135deg, rgba(78,161,255,.22), rgba(123,97,255,.18));
+}
+.btn.primary:hover{background: linear-gradient(135deg, rgba(78,161,255,.28), rgba(123,97,255,.22))}
+
+.btn.ghost{background:transparent; border-color:var(--border2); color:var(--muted)}
+.btn.ghost:hover{color:var(--fg); background:rgba(255,255,255,.06)}
+
+/* Cards */
+.card{
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, transparent), var(--panel2));
+  border:1px solid var(--border2);
+  border-radius:var(--radius-xl);
+  box-shadow: var(--shadow);
+}
+.card.pad{padding:18px 18px}
+.card.soft{box-shadow: 0 8px 22px rgba(0,0,0,.22)}
+
+.kicker{
+  display:inline-flex;
+  align-items:center;
+  gap:10px;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid var(--border2);
+  background:rgba(255,255,255,.04);
+  color:var(--muted);
+  font-size:12px;
+}
+.kdot{width:8px; height:8px; border-radius:50%; background:linear-gradient(135deg, var(--accent3), var(--accent2))}
+
+h1,h2,h3{margin:0 0 8px 0; line-height:1.15}
+h1{font-size:44px; letter-spacing:-.6px}
+h2{font-size:26px; letter-spacing:-.2px}
+h3{font-size:16px; letter-spacing:.2px}
+@media (max-width: 780px){h1{font-size:34px}}
+
+.muted{color:var(--muted)}
+.mini{font-size:12px; color:var(--muted)}
+
+/* Inputs */
+input, select, textarea{
+  font:inherit;
+  color:var(--fg);
+  background: rgba(0,0,0,.12);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  padding:10px 12px;
+  outline:none;
+}
+html.theme-light input, html.theme-light select, html.theme-light textarea{background: rgba(10,18,48,.03)}
+input:focus, select:focus, textarea:focus{border-color: rgba(78,161,255,.55); box-shadow: 0 0 0 4px rgba(78,161,255,.12)}
+textarea{font-family: var(--mono); font-size: 13px; line-height:1.45}
+label{display:inline-flex; align-items:center; gap:8px}
+
+/* Layout helpers */
+.gtv-page{padding:30px 0 56px}
+.hero{
+  padding:42px 0 18px;
+}
+.hero .grid{display:grid; grid-template-columns: 1.15fr .85fr; gap:22px; align-items:stretch}
+@media (max-width: 980px){.hero .grid{grid-template-columns:1fr;}}
+
+.hero-actions{display:flex; gap:10px; flex-wrap:wrap; margin-top:16px}
+
+.feature-grid{display:grid; grid-template-columns: repeat(3, 1fr); gap:16px; margin-top:16px}
+@media (max-width: 980px){.feature-grid{grid-template-columns:1fr}}
+
+.feature-card{padding:18px 18px}
+.feature-card h3{display:flex; align-items:center; justify-content:space-between; gap:10px}
+.feature-card .icon{
+  width:34px; height:34px; border-radius:12px;
+  background: rgba(255,255,255,.06);
+  border: 1px solid var(--border2);
+  display:grid; place-items:center;
+}
+
+.hr{height:1px; background:var(--border2); margin:16px 0}
+
+/* Utility badge */
+.badge{display:inline-flex; align-items:center; gap:8px; font-size:12px; color:var(--muted);
+  padding:7px 10px; border-radius:999px; border:1px solid var(--border2); background:rgba(255,255,255,.04)}
+
+/* Improve default <code>/<pre> */
+code, pre{font-family: var(--mono)}
+code{background:rgba(255,255,255,.06); border:1px solid var(--border2); padding:2px 6px; border-radius:8px}
+pre{
+  background: rgba(0,0,0,.18);
+  border:1px solid var(--border2);
+  border-radius: 14px;
+  padding: 12px 14px;
+  overflow:auto;
+}
+
+/* Existing class compat */
+.choose{font-size:12px; color:var(--muted)}
+.hint{color:var(--muted)}
+
+/* Make checkboxes nicer without breaking */
+input[type="checkbox"]{width:16px; height:16px; accent-color: var(--accent)}
+input[type="range"]{accent-color: var(--accent)}
+
+/* Default page footer */
+.gtv-footer{padding:22px 0 40px; color:var(--muted); font-size:12px}
+
+/* Responsive layout */
+@media (max-width: 1024px){
+  :root{--container: 960px}
+}
+
+@media (max-width: 900px){
+  .container{padding:0 18px}
+  .gtv-nav{
+    height:auto;
+    padding:12px 0;
+  }
+  .gtv-nav .inner{
+    flex-direction:column;
+    align-items:flex-start;
+  }
+  .gtv-navlinks,
+  .gtv-navactions{
+    width:100%;
+    justify-content:flex-start;
+  }
+  .gtv-navactions{flex-wrap:wrap}
+  .gtv-page{padding:24px 0 44px}
+  .hero{padding:30px 0 12px}
+  .card.pad{padding:16px}
+}
+
+@media (max-width: 640px){
+  h1{font-size:30px}
+  h2{font-size:22px}
+  .container{padding:0 14px}
+  .gtv-brand{min-width:0}
+  .gtv-brand-title{font-size:14px}
+  .gtv-brand-sub{font-size:11px}
+  .gtv-navactions .btn,
+  .gtv-navactions .gtv-link{
+    width:100%;
+    justify-content:center;
+  }
+  .gtv-navlinks{
+    flex-direction:column;
+    align-items:flex-start;
+  }
+  .hero-actions{flex-direction:column}
+  .badge{flex-wrap:wrap}
+}
+
+@media (max-width: 420px){
+  .btn{padding:9px 12px}
+  input, select, textarea{padding:9px 10px}
+  .gtv-page{padding:18px 0 36px}
+}

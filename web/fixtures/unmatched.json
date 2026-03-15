@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "events": [
+    { "time_ms": 1, "event": "go_create", "g": 1, "role": "main" },
+    { "time_ms": 2, "event": "chan_make", "g": 1, "channel_key": "ch_unmatched", "channel": "ch_unmatched" },
+    {
+      "time_ms": 3,
+      "event": "chan_send",
+      "g": 1,
+      "channel_key": "ch_unmatched",
+      "channel": "ch_unmatched",
+      "unknown_receiver": true
+    }
+  ]
+}

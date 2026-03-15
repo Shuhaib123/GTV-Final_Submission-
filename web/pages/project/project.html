@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GTV — Project GTV</title>
+  <link rel="stylesheet" href="../../shared/base.css" />
+  <link rel="stylesheet" href="../index/index.css" />
+  <script src="../../shared/ui.js" defer></script>
+</head>
+<body>
+  <header class="gtv-nav">
+    <div class="container inner">
+      <a class="gtv-brand" href="../index/index.html" aria-label="Go Trace Visualizer Home">
+        <div class="gtv-logo" aria-hidden="true"></div>
+        <div>
+          <div class="gtv-brand-title">Go Trace Visualizer</div>
+          <div class="gtv-brand-sub">Project GTV</div>
+        </div>
+      </a>
+      <nav class="gtv-navlinks" aria-label="Primary">
+        <a class="gtv-link" href="../index/index.html">Home</a>
+        <a class="gtv-link" href="../demo/demo.html">Demo</a>
+        <a class="gtv-link" href="../instrument/instrument.html">Start</a>
+      </nav>
+      <div class="gtv-navactions">
+        <button class="btn ghost" type="button" data-gtv-theme-toggle>Theme</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="gtv-page">
+    <section class="hero">
+      <div class="container">
+        <div class="kicker"><span class="kdot" aria-hidden="true"></span>What GTV does</div>
+        <h1>Project GTV</h1>
+        <p class="muted" style="max-width: 80ch">
+          GTV instruments Go programs, converts runtime trace output into a structured event stream, and renders an interactive topology graph.
+          It is designed for education: stable layouts, step-by-step playback, and clear message-flow edges.
+        </p>
+
+        <div class="card pad" style="margin-top:18px">
+          <div class="project-grid">
+            <div class="mini"><strong>Modes</strong><br>Offline parsing (trace.json) and Live streaming (WebSocket).</div>
+            <div class="mini"><strong>Entities</strong><br>Goroutines as nodes, channels as rectangles, edges as message flow.</div>
+            <div class="mini"><strong>Export</strong><br>PNG export + layout persistence per browser.</div>
+          </div>
+        </div>
+
+        <footer class="gtv-footer">
+          <div class="muted">Tip: Use the Demo page to validate your UI quickly before running new workloads.</div>
+        </footer>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

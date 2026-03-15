@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "events": [
+    { "time_ms": 1, "time_ns": 1000000, "event": "chan_make", "g": 1, "channel": "hot", "channel_key": "hot", "role": "main", "source": "log", "seq": 1, "cap": 5, "elem_type": "int" },
+    { "time_ms": 2, "time_ns": 2000000, "event": "goroutine_created", "g": 2, "role": "worker", "source": "state", "seq": 2 },
+    { "time_ms": 3, "time_ns": 3000000, "event": "goroutine_created", "g": 3, "role": "worker", "source": "state", "seq": 3 },
+    { "time_ms": 4, "time_ns": 4000000, "event": "chan_send", "g": 1, "channel": "hot", "channel_key": "hot", "role": "main", "source": "paired", "seq": 4, "msg_id": 1 },
+    { "time_ms": 5, "time_ns": 5000000, "event": "chan_recv", "g": 2, "peer_g": 1, "channel": "hot", "channel_key": "hot", "role": "worker", "source": "paired", "seq": 5, "pair_id": "p1" },
+    { "time_ms": 6, "time_ns": 6000000, "event": "chan_send", "g": 1, "channel": "hot", "channel_key": "hot", "role": "main", "source": "paired", "seq": 6, "msg_id": 2 },
+    { "time_ms": 7, "time_ns": 7000000, "event": "chan_recv", "g": 3, "peer_g": 1, "channel": "hot", "channel_key": "hot", "role": "worker", "source": "paired", "seq": 7, "pair_id": "p2" },
+    { "time_ms": 8, "time_ns": 8000000, "event": "chan_send", "g": 2, "channel": "hot", "channel_key": "hot", "role": "worker", "source": "paired", "seq": 8, "msg_id": 3 },
+    { "time_ms": 9, "time_ns": 9000000, "event": "chan_recv", "g": 1, "peer_g": 2, "channel": "hot", "channel_key": "hot", "role": "main", "source": "paired", "seq": 9, "pair_id": "p3" },
+    { "time_ms": 10, "time_ns": 10000000, "event": "chan_send", "g": 3, "channel": "hot", "channel_key": "hot", "role": "worker", "source": "paired", "seq": 10, "msg_id": 4 },
+    { "time_ms": 11, "time_ns": 11000000, "event": "chan_recv", "g": 1, "peer_g": 3, "channel": "hot", "channel_key": "hot", "role": "main", "source": "paired", "seq": 11, "pair_id": "p4" }
+  ],
+  "entities": {
+    "goroutines": [
+      { "gid": 1, "role": "main", "func": "main.main" },
+      { "gid": 2, "role": "worker", "func": "worker.a" },
+      { "gid": 3, "role": "worker", "func": "worker.b" }
+    ],
+    "channels": [
+      { "chan_id": "hot", "name": "hot", "elem_type": "int", "cap": 5 }
+    ]
+  }
+}

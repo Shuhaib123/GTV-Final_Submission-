@@ -1,0 +1,172 @@
+/* Instrument page layout enhancements (keeps existing IDs intact) */
+.instr-grid{display:grid; grid-template-columns: 1.2fr .8fr; gap:16px; align-items:start}
+.instr-card-title{display:flex; gap:12px; justify-content:space-between; align-items:flex-start; flex-wrap:wrap}
+.instr-card-title .left{min-width:220px}
+
+#code,
+#workloadView{
+  width:100%;
+  display:block;
+  resize:none;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+textarea#code{height:320px}
+textarea#workloadView{height:220px}
+#out{
+  height:420px;
+  max-height:420px;
+  min-height:420px;
+  width:100%;
+  max-width:100%;
+  min-width:0;
+  box-sizing:border-box;
+  overflow:auto;
+  overflow-x:hidden;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+.inline-link{color:var(--fg);text-decoration:underline}
+.inline-link:hover{opacity:.9}
+.gtv-page .btn,
+.gtv-page a.btn{
+  height:40px;
+  padding:0 18px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  font-size:14px;
+  letter-spacing:.2px;
+  line-height:40px;
+  white-space:nowrap;
+}
+.gtv-page .btn.ghost{height:40px}
+.gtv-page .btn,
+.gtv-page a.btn{
+  border-color: rgba(78,161,255,.55);
+  background: linear-gradient(135deg, rgba(78,161,255,.22), rgba(123,97,255,.18));
+}
+.gtv-page .btn:hover,
+.gtv-page a.btn:hover{
+  background: linear-gradient(135deg, rgba(78,161,255,.28), rgba(123,97,255,.22));
+}
+.control-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.control-row label{flex:0 1 auto; min-width:160px}
+.control-row.compact label{min-width:130px}
+.run-actions{align-items:center; gap:12px}
+.run-actions .btn{min-width:140px}
+
+.kb{display:flex; flex-direction:column; gap:16px}
+.kb .tip{
+  margin-top:12px;
+  border-radius: var(--radius-lg);
+  border:1px solid var(--border2);
+  background: rgba(0,0,0,.28);
+  backdrop-filter: blur(12px);
+  padding:14px 16px;
+  box-shadow: var(--shadow);
+}
+html.theme-light .kb .tip{
+  background: rgba(255,255,255,.78);
+}
+.source-card{
+  display:flex;
+  flex-direction:column;
+}
+.workload-actions{
+  margin-top:auto;
+}
+
+.option-group{
+  border:1px solid var(--border2);
+  border-radius: 999px;
+  padding:6px 10px;
+  background: rgba(255,255,255,.05);
+  margin-top:10px;
+  position:relative;
+  display:inline-flex;
+  width:fit-content;
+}
+.option-group summary{
+  cursor:pointer;
+  font-weight:600;
+  color:var(--fg);
+  list-style:none;
+  display:inline-flex;
+  align-items:center;
+  width:fit-content;
+}
+.option-group summary::-webkit-details-marker{display:none}
+.option-group summary::before{
+  content:"▸";
+  display:inline-block;
+  margin-right:8px;
+  color:var(--muted);
+  transform: translateY(-1px);
+}
+.option-group[open] summary::before{content:"▾"}
+.option-group .control-row{margin-top:0}
+.option-panel{
+  position:absolute;
+  top:calc(100% + 10px);
+  left:0;
+  min-width:260px;
+  max-width:520px;
+  padding:12px 12px;
+  border-radius: var(--radius-lg);
+  border:1px solid var(--border2);
+  background: rgba(0,0,0,.35);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+  z-index:20;
+  display:none;
+}
+.option-group[open] .option-panel{display:block}
+html.theme-light .option-panel{background: rgba(255,255,255,.85)}
+
+#code,
+#workloadView,
+#out{
+  border-radius: var(--radius-lg);
+  border:1px solid var(--border2);
+  background: rgba(0,0,0,.28);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+}
+html.theme-light #code,
+html.theme-light #workloadView,
+html.theme-light #out{
+  background: rgba(255,255,255,.78);
+}
+.workload-title{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid var(--border2);
+  background: rgba(255,255,255,.06);
+  color:var(--fg);
+  font-weight:600;
+}
+
+@media (max-width: 1100px){
+  .instr-grid{grid-template-columns:1fr}
+}
+
+@media (max-width: 780px){
+  textarea#code{height:280px}
+  textarea#workloadView{height:220px}
+  #out{height:220px; max-height:220px; min-height:220px}
+  .control-row label{flex:1 1 140px}
+  .run-actions .btn{min-width:unset; width:100%}
+}
+
+@media (max-width: 520px){
+  textarea#code{height:220px}
+  textarea#workloadView{height:200px}
+  .instr-card-title{flex-direction:column; align-items:flex-start}
+  .control-row{gap:8px}
+}

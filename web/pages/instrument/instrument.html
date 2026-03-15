@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GTV — Instrument & Run</title>
+  <link rel="stylesheet" href="../../shared/base.css" />
+  <link rel="stylesheet" href="../index/index.css" />
+  <link rel="stylesheet" href="./instrument.css" />
+  <script src="../../shared/ui.js" defer></script>
+  <script src="./instrument.js" defer></script>
+</head>
+<body>
+  <header class="gtv-nav">
+    <div class="container-wide inner">
+      <a class="gtv-brand" href="../index/index.html" aria-label="Go Trace Visualizer Home">
+        <div class="gtv-logo" aria-hidden="true"></div>
+        <div>
+          <div class="gtv-brand-title">Go Trace Visualizer</div>
+          <div class="gtv-brand-sub">Instrument & run</div>
+        </div>
+      </a>
+      <nav class="gtv-navlinks" aria-label="Primary">
+        <a class="gtv-link" href="../index/index.html">Home</a>
+        <a class="gtv-link" href="../demo/demo.html">Demo</a>
+        <a class="gtv-link" href="../project/project.html">Project GTV</a>
+      </nav>
+      <div class="gtv-navactions">
+        <button class="btn ghost" type="button" data-gtv-theme-toggle>Theme</button>
+        <a class="btn" href="../graph/graph.html?return=../instrument/instrument.html" target="_blank" rel="noopener">Open Offline</a>
+        <a class="btn" href="../graph-live/graph-live.html?return=../instrument/instrument.html" target="_blank" rel="noopener">Open Live</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="gtv-page">
+    <div class="container-wide">
+      <div class="kicker"><span class="kdot" aria-hidden="true"></span>From source → workload → trace.json</div>
+      <h2 style="margin-top:10px">Instrument & Run</h2>
+      <p class="muted" style="max-width: 80ch">
+        Paste a Go <code>main</code> program, generate a workload, and run once to retrieve <code>trace.json</code>.
+        The live viewer link updates automatically for the active workload.
+      </p>
+
+      <div class="instr-grid" style="margin-top: 14px">
+        <section class="card pad source-card">
+          <div class="instr-card-title">
+            <div class="left">
+              <h3>1.Source input</h3>
+              <div class="mini">Paste a Go program or load a <code>.go</code> file.</div>
+            </div>
+            <div class="control-row">
+              <button class="btn" id="btnLoadCode" type="button">Load Go Code</button>
+              <input id="fileGoCode" type="file" accept=".go" style="display:none" />
+            </div>
+          </div>
+
+          <textarea id="code" spellcheck="false" placeholder="package main
+
+import \"fmt\"
+
+func main(){
+  // gtv:send=out[0]
+  ch := make(chan int,1); ch <- 1
+  // gtv:recv=out[0]
+  _ = <-ch
+  fmt.Println(\"done\")
+}"></textarea>
+
+          <div class="hr"></div>
+
+          <div class="mini workload-title">2. Workload (generated or loaded):</div>
+          <textarea id="workloadView" spellcheck="false" readonly placeholder="No workload loaded yet."></textarea>
+
+          <div class="hr"></div>
+
+          <h3 style="margin-bottom: 8px">Instrumentation Options </h3>
+          <div class="control-row">
+            <label>Name <input id="name" placeholder="MyWork" /></label>
+            <label class="mini">Guard labels <input type="checkbox" id="guard" checked /></label>
+            <label class="mini">Goroutine regions <input type="checkbox" id="gorRegions" checked /></label>
+            <label class="mini">Level
+              <select id="level">
+                <option value="regions">regions only</option>
+                <option value="regions_logs" selected>regions + logs (sync-friendly default)</option>
+                <option value="tasks_only">tasks only</option>
+              </select>
+            </label>
+            <label class="mini">Event mode
+              <select id="mode">
+                <option value="teach">teach</option>
+                <option value="debug" selected>debug</option>
+              </select>
+            </label>
+            <button class="btn ghost" id="btnSyncInstrPreset" type="button">Sync Capture Preset</button>
+          </div>
+
+          <details class="option-group">
+            <summary>Advanced tracing</summary>
+            <div class="option-panel">
+              <div class="control-row compact">
+                <label class="mini">Value logs <input type="checkbox" id="valueLogs" /></label>
+                <label class="mini">Block regions <input type="checkbox" id="blockRegions" checked /></label>
+              </div>
+            </div>
+          </details>
+
+          <details class="option-group">
+            <summary>I/O instrumentation</summary>
+            <div class="option-panel">
+              <div class="control-row compact">
+                <label class="mini">I/O regions <input type="checkbox" id="ioRegions" /></label>
+                <label class="mini">JSON <input type="checkbox" id="ioJSON" /></label>
+                <label class="mini">DB <input type="checkbox" id="ioDB" /></label>
+                <label class="mini">HTTP <input type="checkbox" id="ioHTTP" /></label>
+                <label class="mini">OS I/O <input type="checkbox" id="ioOS" /></label>
+              </div>
+            </div>
+          </details>
+
+          <div class="control-row workload-actions" style="margin-top:12px">
+            <button class="btn primary" id="btnInstrument" type="button">Create Workload</button>
+            <button class="btn" id="btnLoadWorkload" type="button">Load Workload</button>
+            <div id="status" class="mini status-line"></div>
+          </div>
+        </section>
+
+        <aside class="kb">
+          <section class="card pad">
+            <div class="instr-card-title">
+              <div class="left">
+                <h3>3. Run Once (Return JSON)</h3>
+              </div>
+            </div>
+
+            <div class="control-row run-actions">
+              <button class="btn primary" id="btnRun" type="button">Run Once</button>
+              <a id="liveGraphLink" href="#" target="_blank" rel="noopener" class="btn" style="display:none">Open Live Graph</a>
+            </div>
+
+            <details class="option-group">
+              <summary>Run Options</summary>
+              <div class="option-panel">
+                <div class="control-row compact">
+                  <label class="mini">Synth <input type="checkbox" id="synth" checked /></label>
+                  <label class="mini">Drop unlabeled blocked <input type="checkbox" id="drop" /></label>
+                  <label class="mini">Run ms
+                    <input type="number" id="timeoutMs" min="50" max="20000" value="1000" style="width:92px" />
+                  </label>
+                  <label class="mini" title="Caches built runner binaries per workload; speeds Run Once. Uncheck to force rebuild each run.">Build cache
+                    <input type="checkbox" id="buildCache" checked />
+                  </label>
+                  <button class="btn ghost" id="btnClearCache" type="button">Clear build cache</button>
+                  <span id="timeoutWarn" class="mini" style="color:var(--warn); display:none"></span>
+                  <label class="mini">Broadcast mode
+                    <select id="bcMode">
+                      <option value="">(default)</option>
+                      <option value="buffered">buffered</option>
+                      <option value="blocking">blocking</option>
+                      <option value="both">both</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+            </details>
+
+            <div class="hr"></div>
+
+            <div class="mini">Output</div>
+            <pre id="out" style="overflow:auto"></pre>
+
+            <div class="control-row run-actions" style="margin-top:10px">
+              <button class="btn" id="btnDownload" type="button">Download JSON</button>
+              <a id="btnOffline" href="../graph/graph.html?return=../instrument/instrument.html" target="_blank" rel="noopener" class="btn">Load Offline Graph</a>
+              <span id="dlHint" class="mini"></span>
+            </div>
+          </section>
+
+          <section class="tip">
+            <div style="font-weight:700; color:var(--fg); margin-bottom:6px">How to use GTV</div>
+            <ul style="margin:0; padding-left:18px">
+              <li>Choose a workload name, then click <b>Run Once</b> to generate a fresh trace.</li>
+              <li>Click <b>Load Offline Graph</b> to inspect the full run after it finishes.</li>
+              <li>Open <b>Live Graph</b> to watch events stream while a workload is active.</li>
+              <li>Use <b>Sync Capture Preset</b> for mutex/rwmutex/wg/cond-focused traces.</li>
+              <li>In Live, use <b>Sync View</b> to switch to debug events + causal overlay.</li>
+              <li>Optional: enable layer filters with <code>?layers=1</code> to toggle Channel/Sync/Spawn/Causal visibility.</li>
+              <li>Click any node or edge in a graph to see details, timing, and related events.</li>
+              <li>Use <b>Legend</b>, <b>Fit View</b>, and <b>Clear Layout</b> whenever the graph feels crowded.</li>
+            </ul>
+            <div class="mini" style="margin-top:8px">Advanced view options like <code>Split P2P</code> and causal overlays are optional and can be explored later.</div>
+          </section>
+        </aside>
+      </div>
+
+    </div>
+  </main>
+</body>
+</html>
