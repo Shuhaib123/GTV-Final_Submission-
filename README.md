@@ -11,79 +11,47 @@ It includes an instrumenter, a shared trace processor, and two graph viewers wit
 
 ```mermaid
 
+```mermaid
 flowchart LR
-  %% =========================
-  %% Top-level execution path
-  %% =========================
-  A["Go Workload Source<br/>existing program / generated workload / instrumented program"]
-  B["Instrumentation<br/>optional but recommended<br/>internal/instrumenter"]
-  C["Run Go Binary"]
-
-  A --> B
-  A --> C
+  A["Go Workload Source"] --> B["Instrumentation (optional)<br/>internal/instrumenter"]
+  A --> C["Run Go Binary"]
   B --> C
 
-  %% Outputs from execution
   C --> D["runtime/trace live stream"]
   C --> E["trace.out file"]
 
-  %% =========================
-  %% Offline path
-  %% =========================
-  subgraph OFF["Offline Path - Post-Mortem Replay"]
+  subgraph LIVE["Live Path (real-time)"]
     direction LR
-    G["Offline Trace Processing<br/>internal/traceproc"]
+    F["cmd/gtv-live<br/>x/exp/trace.Reader + internal/traceproc"]
+    H["/trace WebSocket<br/>incremental JSON events"]
+    K["Live Graph Viewer<br/>web/pages/graph-live"]
+    D --> F --> H --> K
+  end
+
+  subgraph OFF["Offline Path (post-run replay)"]
+    direction LR
+    G["main.go + parser.go<br/>uses internal/traceproc"]
     I["trace.json<br/>events + entities + metadata"]
     L["Offline Graph Viewer<br/>web/pages/graph"]
-
-    E --> G
-    G --> I
+    E --> G --> I --> L
   end
 
-  %% =========================
-  %% Live path
-  %% =========================
-  subgraph LIVE["Live Path - Real-Time Streaming"]
-    direction LR
-    F["Live Trace Reader + Stream Processing<br/>x/exp/trace.Reader + internal/traceproc"]
-    H["Normalized live events/entities<br/>JSON envelope over WebSocket"]
-    K["Live Graph Viewer<br/>web/pages/graph-live"]
-
-    D --> F
-    F --> H
-  end
-
-  %% =========================
-  %% Shared frontend topology
-  %% =========================
   J["Shared Topology Builder<br/>web/shared/topology-builder.js"]
-
   I --> J
   H --> J
-
-  J --> L
   J --> K
+  J --> L
 
-  %% =========================
-  %% Viewer-side derived features
-  %% =========================
-  M["Topology Narration / Structural Summary"]
-  V["Shared Viewer Features<br/>Topology narration<br/>Sync / layer filters<br/>Causal overlays<br/>Debug / teach modes"]
-
+  M["Topology Narration<br/>formation-only summary"]
   J -.-> M
-  V -.-> L
-  V -.-> K
 
-  %% =========================
-  %% Semantics / structural layers
-  %% =========================
-  subgraph S["Graph Semantics / Structural Layers"]
+  subgraph S["Graph Semantics"]
     direction TB
     N["spawn: parent goroutine -> child goroutine"]
-    O["channel layer: send / recv"]
-    P["sync layer: lock / unlock / wg / cond"]
-    Q["causal layer: optional overlay"]
-    R["resource interaction / creation edges"]
+    O["create: goroutine -> channel/resource"]
+    P["channel layer: send/recv"]
+    Q["sync layer: lock/unlock/wg/cond"]
+    R["causal layer: optional overlay"]
   end
 
   J --- N
@@ -92,26 +60,29 @@ flowchart LR
   J --- Q
   J --- R
 
-  %% =========================
-  %% Optional styling
-  %% =========================
-  classDef source fill:#f3f4f6,stroke:#9ca3af,color:#111827,stroke-width:1px;
-  classDef optional fill:#f59e0b,stroke:#b45309,color:#ffffff,stroke-width:1px;
+  classDef source fill:#eef2ff,stroke:#4f46e5,color:#111827,stroke-width:1px;
+  classDef optional fill:#fb923c,stroke:#c2410c,color:#ffffff,stroke-width:1px;
   classDef exec fill:#14b8a6,stroke:#0f766e,color:#ffffff,stroke-width:1px;
-  classDef offline fill:#facc15,stroke:#ca8a04,color:#111827,stroke-width:1px;
-  classDef live fill:#d9f99d,stroke:#65a30d,color:#111827,stroke-width:1px;
-  classDef topology fill:#2dd4bf,stroke:#0f766e,color:#ffffff,stroke-width:1px;
-  classDef viewer fill:#e9d5ff,stroke:#8b5cf6,color:#111827,stroke-width:1px;
-  classDef feature fill:#f8fafc,stroke:#94a3b8,color:#111827,stroke-dasharray: 4 3;
+  classDef stream fill:#dbeafe,stroke:#1d4ed8,color:#111827,stroke-width:1px;
+  classDef live fill:#dcfce7,stroke:#16a34a,color:#111827,stroke-width:1px;
+  classDef offline fill:#fef3c7,stroke:#d97706,color:#111827,stroke-width:1px;
+  classDef topology fill:#99f6e4,stroke:#0f766e,color:#111827,stroke-width:1px;
+  classDef viewer fill:#ede9fe,stroke:#7c3aed,color:#111827,stroke-width:1px;
+  classDef feature fill:#f8fafc,stroke:#64748b,color:#111827,stroke-dasharray:4 3;
+  classDef semantic fill:#f1f5f9,stroke:#475569,color:#111827,stroke-width:1px;
 
   class A source;
   class B optional;
   class C exec;
-  class G,I offline;
-  class F,H live;
+  class D,E stream;
+  class F,H,K live;
+  class G,I,L offline;
   class J topology;
   class K,L viewer;
-  class M,V,N,O,P,Q,R feature;
+  class M feature;
+  class N,O,P,Q,R semantic;
+
+```
 
 
   ```
