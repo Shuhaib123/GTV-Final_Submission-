@@ -82,9 +82,6 @@ flowchart LR
   class M feature;
   class N,O,P,Q,R semantic;
 
-```
-
-
   ```
 
 
