@@ -8,7 +8,6 @@ GTV visualizes Go concurrency from `runtime/trace` in two modes:
 It includes an instrumenter, a shared trace processor, and two graph viewers with synchronization-aware topology.
 
 ## Current Pipeline
-
 ```mermaid
 flowchart LR
   A[Go workload source] --> B[Instrumenter\n(optional but recommended)\ninternal/instrumenter]
