@@ -1002,9 +1002,7 @@ func (st *ParseState) newID(prefix string) string {
 
 func (st *ParseState) markGoroutineInterested(gid int64) {
 	st.Interested[gid] = struct{}{}
-	if _, ok := st.pendingGoroutines[gid]; ok {
-		delete(st.pendingGoroutines, gid)
-	}
+	delete(st.pendingGoroutines, gid)
 }
 
 func (st *ParseState) setRole(gid int64, role string) {
