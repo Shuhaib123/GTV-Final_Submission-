@@ -7,6 +7,47 @@ GTV visualizes Go concurrency from `runtime/trace` in two modes:
 
 It includes an instrumenter, a shared trace processor, and two graph viewers with synchronization-aware topology.
 
+
+## Current Pipeline
+
+```mermaid
+flowchart LR
+  A[Go workload source] --> B[Instrumenter\n(optional but recommended)\ninternal/instrumenter]
+  B --> C[Run instrumented binary]
+
+  C --> D[runtime/trace stream]
+  C --> E[trace.out file]
+
+  D --> F[Live parser\ncmd/gtv-live + internal/traceproc]
+  E --> G[Offline parser\ninternal/traceproc]
+
+  F --> H[Normalized events/entities\n(JSON envelope over WebSocket)]
+  G --> I[trace.json\n(events + entities)]
+
+  H --> J[Topology Builder\nweb/shared/topology-builder.js]
+  I --> J
+
+  J --> K[Live Graph\nweb/pages/graph-live]
+  J --> L[Offline Graph\nweb/pages/graph]
+
+  J --> M[Topology Narration\nformation-only summary]
+
+  subgraph Semantics
+    N[create: goroutine -> channel/resource]
+    O[spawn: parent goroutine -> child goroutine]
+    P[channel layer: send/recv]
+    Q[sync layer: lock/unlock/wg/cond]
+    R[causal layer: optional overlay]
+  end
+
+  J --- N
+  J --- O
+  J --- P
+  J --- Q
+  J --- R
+```
+
+
 ## What Is Current
 
 - Web UI lives under `web/pages/*` (not the legacy flat `web/*.html` paths).
