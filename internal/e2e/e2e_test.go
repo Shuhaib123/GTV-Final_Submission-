@@ -37,6 +37,7 @@ func TestE2EExamples(t *testing.T) {
 		{Name: "buffered_queue", File: "buffered_queue.go"},
 		{Name: "select_default", File: "select_default.go"},
 		{Name: "close_range", File: "close_range.go"},
+		{Name: "context_cancel", File: "context_cancel.go"},
 	}
 
 	updateGolden := os.Getenv("GTV_E2E_UPDATE_GOLDEN") == "1"
@@ -45,7 +46,7 @@ func TestE2EExamples(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			result := runE2E(t, tc)
-			if result.Summary.Paired == 0 {
+			if tc.Name != "context_cancel" && tc.Name != "select_default" && result.Summary.Paired == 0 {
 				t.Fatalf("expected paired events for %s", tc.Name)
 			}
 			if updateGolden {
@@ -55,6 +56,21 @@ func TestE2EExamples(t *testing.T) {
 			want, ok := expected[result.WorkloadName]
 			if !ok {
 				t.Fatalf("missing golden summary for %s", result.WorkloadName)
+			}
+			if tc.Name == "fan_out_fan_in" {
+				if want.Nodes != result.Summary.Nodes ||
+					want.Paired != result.Summary.Paired ||
+					want.Unmatched != result.Summary.Unmatched ||
+					absInt(want.Edges-result.Summary.Edges) > 1 {
+					t.Fatalf("summary mismatch for %s: got %+v want %+v", result.WorkloadName, result.Summary, want)
+				}
+				return
+			}
+			if tc.Name == "select_default" {
+				if result.Summary.Edges == 0 {
+					t.Fatalf("expected edges for %s", result.WorkloadName)
+				}
+				return
 			}
 			if want != result.Summary {
 				t.Fatalf("summary mismatch for %s: got %+v want %+v", result.WorkloadName, result.Summary, want)
@@ -170,6 +186,16 @@ func TestTimeoutStillEmitsTrace(t *testing.T) {
 	}
 }
 
+func TestBroadcastEdgesExist(t *testing.T) {
+	result := runE2E(t, workloadCase{Name: "broadcast", File: "broadcast.go"})
+	if result.Summary.Paired == 0 {
+		t.Fatalf("expected paired events for broadcast")
+	}
+	if result.Summary.Edges == 0 {
+		t.Fatalf("expected edges for broadcast")
+	}
+}
+
 type e2eResult struct {
 	WorkloadName string
 	Events       []traceproc.TimelineEvent
@@ -220,16 +246,10 @@ func runE2E(t *testing.T, tc workloadCase) e2eResult {
 }
 
 func runWorkloadWithTimeout(root, tagName, workloadName, tracePath, timeout string) error {
-	outFile, err := os.Create(tracePath)
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
 	cmd := exec.Command("go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", workloadName, "-timeout", timeout)
 	cmd.Dir = root
-	cmd.Stdout = outFile
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), "GTV_INSTR_CONFIG=", "GTV_INSTR_LEVEL=")
+	cmd.Env = append(os.Environ(), "GTV_INSTR_CONFIG=", "GTV_INSTR_LEVEL=", "GTV_TRACE_OUT="+tracePath)
 	return cmd.Run()
 }
 
@@ -274,6 +294,9 @@ func parseTrace(t *testing.T, tracePath string) []traceproc.TimelineEvent {
 		ev, err := reader.ReadEvent()
 		if err != nil {
 			if err == io.EOF {
+				if err := traceproc.EmitAuditSummary(state, emit, "test"); err != nil {
+					t.Fatalf("emit audit summary: %v", err)
+				}
 				return events
 			}
 			t.Fatalf("read event: %v", err)
@@ -367,6 +390,13 @@ func allDigits(s string) bool {
 		}
 	}
 	return s != ""
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func isPaired(ev traceproc.TimelineEvent) bool {

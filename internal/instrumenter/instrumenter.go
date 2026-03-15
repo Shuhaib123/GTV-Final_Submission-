@@ -135,6 +135,7 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 	_ = skipSet
 	_ = timeoutNS
 	_ = hasTimeout
+	valueLogsEnabled := opts.AddValueLogs && (opts.Level == "regions_logs" || opts.Level == "")
 	if doneName != "" {
 		doneName = gen.next("done")
 	}
@@ -143,7 +144,10 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 	cancelName := gen.next("cancel")
 	spawnIDName := gen.next("spawn_id")
 	selectRecvHelper := gen.next("select_recv")
+	selectRecvRegionHelper := gen.next("recv_in_region")
 	selectSendHelper := gen.next("select_send")
+	recvValueHelper := gen.next("recv_value")
+	recvValueOkHelper := gen.next("recv_value_ok")
 	ctxNameByFunc := make(map[*ast.FuncDecl]string)
 
 	// Find main() and convert to Run<Name>Program(ctx context.Context)
@@ -155,8 +159,6 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 		if !ok || fn.Name == nil || fn.Name.Name != "main" {
 			return true
 		}
-		hasStopOnSignal := funcHasSelectorCall(fn, "gtv", "InstallStopOnSignal")
-		hasStopAfter := funcHasSelectorCall(fn, "gtv", "InstallStopAfterFromEnv")
 		fn.Name.Name = runName
 		// params: (ctx context.Context)
 		fn.Type.Params = &ast.FieldList{List: []*ast.Field{{
@@ -173,20 +175,6 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 		deferTask := &ast.DeferStmt{Call: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent(taskName), Sel: ast.NewIdent("End")}}}
 		logStart := &ast.ExprStmt{X: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent("trace"), Sel: ast.NewIdent("Log")}, Args: []ast.Expr{ast.NewIdent(runCtxName), &ast.BasicLit{Kind: token.STRING, Value: "\"main\""}, &ast.BasicLit{Kind: token.STRING, Value: fmt.Sprintf("\"%s starting\"", name)}}}}
 		prelude := []ast.Stmt{assign, deferTask, logStart}
-		if !hasStopOnSignal {
-			prelude = append(prelude, &ast.ExprStmt{X: &ast.CallExpr{
-				Fun: &ast.SelectorExpr{X: ast.NewIdent("gtv"), Sel: ast.NewIdent("InstallStopOnSignal")},
-			}})
-		}
-		if !hasStopAfter {
-			prelude = append(prelude, &ast.ExprStmt{X: &ast.CallExpr{
-				Fun:  &ast.SelectorExpr{X: ast.NewIdent("gtv"), Sel: ast.NewIdent("InstallStopAfterFromEnv")},
-				Args: []ast.Expr{&ast.BasicLit{Kind: token.STRING, Value: "\"GTV_TIMEOUT_MS\""}},
-			}})
-		}
-		if !hasStopOnSignal || !hasStopAfter {
-			ensureImport("jspt/gtv")
-		}
 		fn.Body.List = append(prelude, fn.Body.List...)
 		runFn = fn
 		ctxNameByFunc[fn] = runCtxName
@@ -675,6 +663,37 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 		}
 		return false
 	}
+	paramCount := func(fd *ast.FuncDecl) (int, bool) {
+		if fd == nil || fd.Type == nil || fd.Type.Params == nil {
+			return 0, false
+		}
+		count := 0
+		variadic := false
+		for i, f := range fd.Type.Params.List {
+			if i == len(fd.Type.Params.List)-1 {
+				if _, ok := f.Type.(*ast.Ellipsis); ok {
+					variadic = true
+				}
+			}
+			if len(f.Names) == 0 {
+				count++
+				continue
+			}
+			count += len(f.Names)
+		}
+		return count, variadic
+	}
+	shouldInjectCtx := func(fd *ast.FuncDecl, ce *ast.CallExpr, ctxName string) bool {
+		if fd == nil || ce == nil || ctxName == "" || !hasFirstParamCtx(fd) {
+			return false
+		}
+		count, variadic := paramCount(fd)
+		if variadic {
+			// Minimum args required is count-1 (variadic can be empty).
+			return len(ce.Args) == count-1 && !(len(ce.Args) > 0 && isCtxArg(ce.Args[0], ctxName))
+		}
+		return len(ce.Args) == count-1 && !(len(ce.Args) > 0 && isCtxArg(ce.Args[0], ctxName))
+	}
 	for _, d := range file.Decls {
 		fn, ok := d.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -694,10 +713,8 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 				// function call: search local declarations for a matching function with ctx
 				for _, d := range file.Decls {
 					if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name != nil && fd.Name.Name == fun.Name {
-						if hasFirstParamCtx(fd) {
-							if !(len(ce.Args) > 0 && isCtxArg(ce.Args[0], ctxName)) {
-								ce.Args = append([]ast.Expr{ast.NewIdent(ctxName)}, ce.Args...)
-							}
+						if shouldInjectCtx(fd, ce, ctxName) {
+							ce.Args = append([]ast.Expr{ast.NewIdent(ctxName)}, ce.Args...)
 						}
 						break
 					}
@@ -712,10 +729,8 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 				// otherwise, treat as method on local type; match by method name
 				for _, d := range file.Decls {
 					if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv != nil && fd.Name != nil && fd.Name.Name == fun.Sel.Name {
-						if hasFirstParamCtx(fd) {
-							if !(len(ce.Args) > 0 && isCtxArg(ce.Args[0], ctxName)) {
-								ce.Args = append([]ast.Expr{ast.NewIdent(ctxName)}, ce.Args...)
-							}
+						if shouldInjectCtx(fd, ce, ctxName) {
+							ce.Args = append([]ast.Expr{ast.NewIdent(ctxName)}, ce.Args...)
 						}
 						break
 					}
@@ -860,6 +875,31 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 			lbl = addPrefix(lbl, fmt.Sprintf("%s: send to ", prefix))
 		}
 		return lbl, needFmt
+	}
+
+	isTimerChanExpr := func(expr ast.Expr) bool {
+		switch e := expr.(type) {
+		case *ast.CallExpr:
+			if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "time" {
+					name := sel.Sel.Name
+					return name == "After" || name == "NewTimer" || name == "NewTicker"
+				}
+			}
+		case *ast.SelectorExpr:
+			// time.NewTimer(...).C or time.NewTicker(...).C
+			if e.Sel != nil && e.Sel.Name == "C" {
+				if call, ok := e.X.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+						if id, ok := sel.X.(*ast.Ident); ok && id.Name == "time" {
+							name := sel.Sel.Name
+							return name == "NewTimer" || name == "NewTicker"
+						}
+					}
+				}
+			}
+		}
+		return false
 	}
 
 	channelExprFromClause := func(c *ast.CommClause) ast.Expr {
@@ -1182,6 +1222,165 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 			typeChecked = true
 		}
 	}
+	// Best-effort: collect channel variable names to identify range over channels
+	// when type checking is unavailable or incomplete.
+	chanNames := map[string]bool{}
+	condNames := map[string]bool{}
+	mutexNames := map[string]bool{}
+	rwMutexNames := map[string]bool{}
+	wgNames := map[string]bool{}
+	isMakeChanCall := func(e ast.Expr) bool {
+		call, ok := e.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "make" || len(call.Args) == 0 {
+			return false
+		}
+		_, ok = call.Args[0].(*ast.ChanType)
+		return ok
+	}
+	isNewCondCall := func(e ast.Expr) bool {
+		call, ok := e.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil {
+			return false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		return pkg.Name == "sync" && sel.Sel.Name == "NewCond"
+	}
+	var syncTypeFromExpr func(ast.Expr) string
+	syncTypeFromExpr = func(t ast.Expr) string {
+		switch tt := t.(type) {
+		case *ast.SelectorExpr:
+			if id, ok := tt.X.(*ast.Ident); ok && id.Name == "sync" {
+				switch tt.Sel.Name {
+				case "Mutex":
+					return "mutex"
+				case "RWMutex":
+					return "rwmutex"
+				case "WaitGroup":
+					return "wg"
+				}
+			}
+		case *ast.StarExpr:
+			return syncTypeFromExpr(tt.X)
+		}
+		return ""
+	}
+	var syncInitFromExpr func(ast.Expr) string
+	syncInitFromExpr = func(e ast.Expr) string {
+		switch ee := e.(type) {
+		case *ast.UnaryExpr:
+			if ee.Op == token.AND {
+				return syncInitFromExpr(ee.X)
+			}
+		case *ast.CompositeLit:
+			return syncTypeFromExpr(ee.Type)
+		case *ast.CallExpr:
+			if id, ok := ee.Fun.(*ast.Ident); ok && id.Name == "new" && len(ee.Args) > 0 {
+				return syncTypeFromExpr(ee.Args[0])
+			}
+		}
+		return ""
+	}
+	var isCondType func(ast.Expr) bool
+	isCondType = func(t ast.Expr) bool {
+		switch tt := t.(type) {
+		case *ast.SelectorExpr:
+			if id, ok := tt.X.(*ast.Ident); ok {
+				return id.Name == "sync" && tt.Sel.Name == "Cond"
+			}
+		case *ast.StarExpr:
+			return isCondType(tt.X)
+		}
+		return false
+	}
+	addChanName := func(id *ast.Ident) {
+		if id != nil && id.Name != "_" {
+			chanNames[id.Name] = true
+		}
+	}
+	addCondName := func(id *ast.Ident) {
+		if id != nil && id.Name != "_" {
+			condNames[id.Name] = true
+		}
+	}
+	addSyncName := func(kind string, id *ast.Ident) {
+		if id == nil || id.Name == "_" {
+			return
+		}
+		switch kind {
+		case "mutex":
+			mutexNames[id.Name] = true
+		case "rwmutex":
+			rwMutexNames[id.Name] = true
+		case "wg":
+			wgNames[id.Name] = true
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch t := n.(type) {
+		case *ast.AssignStmt:
+			if t.Tok != token.DEFINE && t.Tok != token.ASSIGN {
+				return true
+			}
+			for i := 0; i < len(t.Lhs) && i < len(t.Rhs); i++ {
+				if !isMakeChanCall(t.Rhs[i]) {
+					if isNewCondCall(t.Rhs[i]) {
+						if id, ok := t.Lhs[i].(*ast.Ident); ok {
+							addCondName(id)
+						}
+					}
+					if kind := syncInitFromExpr(t.Rhs[i]); kind != "" {
+						if id, ok := t.Lhs[i].(*ast.Ident); ok {
+							addSyncName(kind, id)
+						}
+					}
+					continue
+				}
+				if id, ok := t.Lhs[i].(*ast.Ident); ok {
+					addChanName(id)
+				}
+			}
+		case *ast.ValueSpec:
+			if _, ok := t.Type.(*ast.ChanType); ok {
+				for _, name := range t.Names {
+					addChanName(name)
+				}
+			}
+			if isCondType(t.Type) {
+				for _, name := range t.Names {
+					addCondName(name)
+				}
+			}
+			if kind := syncTypeFromExpr(t.Type); kind != "" {
+				for _, name := range t.Names {
+					addSyncName(kind, name)
+				}
+			}
+			for i := 0; i < len(t.Names) && i < len(t.Values); i++ {
+				if isMakeChanCall(t.Values[i]) {
+					addChanName(t.Names[i])
+					continue
+				}
+				if isNewCondCall(t.Values[i]) {
+					addCondName(t.Names[i])
+				}
+				if kind := syncInitFromExpr(t.Values[i]); kind != "" {
+					addSyncName(kind, t.Names[i])
+				}
+			}
+		}
+		return true
+	})
 	// Helper: detect whether a selector is a method on *sql.DB, *sql.Tx, or *sql.Stmt
 	isSQLSelector := func(sel *ast.SelectorExpr) (recvName string, method string, ok bool) {
 		if !typeChecked || sel == nil || sel.Sel == nil {
@@ -1212,7 +1411,7 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 		}
 		return tn, sel.Sel.Name, true
 	}
-	var instrumentStmts func([]ast.Stmt, string, string) []ast.Stmt
+	var instrumentStmts func([]ast.Stmt, string, string, bool, bool) []ast.Stmt
 	phaseStack := make([]string, 0)
 	// track generated function names to avoid duplicates
 	generated := make(map[string]bool)
@@ -1220,7 +1419,48 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 	allowBareReturn := false
 	usedSpawn := false
 	selectHelperNeeded := false
-	instrumentStmts = func(list []ast.Stmt, ctxName string, fnRole string) []ast.Stmt {
+	recvHelperNeeded := false
+	isChanRange := func(x ast.Expr) bool {
+		if x == nil {
+			return false
+		}
+		if typeChecked {
+			t := typeInfo.Types[x].Type
+			if t == nil {
+				// fall back to heuristic below
+			} else {
+				if p, ok := t.(*types.Pointer); ok {
+					t = p.Elem()
+				}
+				if n, ok := t.(*types.Named); ok {
+					t = n.Underlying()
+				}
+				if _, ok := t.(*types.Chan); ok {
+					return true
+				}
+			}
+		}
+		if id, ok := x.(*ast.Ident); ok {
+			return chanNames[id.Name]
+		}
+		return false
+	}
+	ctxNameFromParams := func(params *ast.FieldList) string {
+		if params == nil || len(params.List) == 0 {
+			return ""
+		}
+		field := params.List[0]
+		if field == nil || len(field.Names) == 0 {
+			return ""
+		}
+		if se, ok := field.Type.(*ast.SelectorExpr); ok {
+			if id, ok := se.X.(*ast.Ident); ok && id.Name == "context" && se.Sel.Name == "Context" {
+				return field.Names[0].Name
+			}
+		}
+		return ""
+	}
+	instrumentStmts = func(list []ast.Stmt, ctxName string, fnRole string, inLoop bool, wgInScope bool) []ast.Stmt {
 		hasCtx := ctxName != ""
 		var ctxExpr ast.Expr
 		if hasCtx {
@@ -1246,6 +1486,9 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 			if ue, ok := assign.Rhs[0].(*ast.UnaryExpr); !ok || ue.Op != token.ARROW {
 				return
 			} else {
+				if len(assign.Lhs) != 1 {
+					return
+				}
 				tmpName := gen.next("recv")
 				tmp := ast.NewIdent(tmpName)
 				c.Comm = &ast.AssignStmt{
@@ -1287,12 +1530,81 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 			stmts = append(stmts, c.Body...)
 			c.Body = []ast.Stmt{wrapWithRegionExprGuarded(label, &ast.BlockStmt{List: stmts}, gated)}
 		}
+		clauseHasBackoff := func(stmts []ast.Stmt) bool {
+			for _, st := range stmts {
+				found := false
+				ast.Inspect(st, func(n ast.Node) bool {
+					if ce, ok := n.(*ast.CallExpr); ok {
+						if sel, ok := ce.Fun.(*ast.SelectorExpr); ok {
+							if id, ok := sel.X.(*ast.Ident); ok {
+								if (id.Name == "time" && sel.Sel.Name == "Sleep") || (id.Name == "runtime" && sel.Sel.Name == "Gosched") {
+									found = true
+									return false
+								}
+							}
+						}
+					}
+					return !found
+				})
+				if found {
+					return true
+				}
+			}
+			return false
+		}
+		addSelectDefaultBackoff := func(s *ast.SelectStmt) {
+			if !inLoop || s == nil || s.Body == nil {
+				return
+			}
+			for _, cc := range s.Body.List {
+				c, ok := cc.(*ast.CommClause)
+				if !ok || c.Comm != nil {
+					continue
+				}
+				if clauseHasBackoff(c.Body) {
+					continue
+				}
+				ensureImport("time")
+				c.Body = append(c.Body, mkStmt("time.Sleep(1 * time.Millisecond)"))
+			}
+		}
+		syncRegionLabelForCall := func(call *ast.CallExpr) (string, bool) {
+			if !opts.AddBlockRegions {
+				return "", false
+			}
+			if call == nil {
+				return "", false
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel == nil {
+				return "", false
+			}
+			method := sel.Sel.Name
+			if id, ok := sel.X.(*ast.Ident); ok {
+				name := id.Name
+				if !strings.HasPrefix(name, "__jspt_wg") {
+					if mutexNames[name] && (method == "Lock" || method == "Unlock") {
+						return fmt.Sprintf("mutex.%s %s", strings.ToLower(method), name), true
+					}
+					if rwMutexNames[name] && (method == "Lock" || method == "Unlock" || method == "RLock" || method == "RUnlock") {
+						return fmt.Sprintf("rwmutex.%s %s", strings.ToLower(method), name), true
+					}
+					if wgNames[name] && (method == "Add" || method == "Done" || method == "Wait") {
+						return fmt.Sprintf("wg.%s %s", strings.ToLower(method), name), true
+					}
+				}
+				if (method == "Wait" || method == "Signal" || method == "Broadcast") && condNames[name] {
+					return fmt.Sprintf("cond.%s %s", strings.ToLower(method), name), true
+				}
+			}
+			return "", false
+		}
 
-		rewriteSelectClauseWithHelper := func(c *ast.CommClause, kind string, label ast.Expr, chExpr ast.Expr, valExpr string) bool {
+		rewriteSelectClauseWithHelper := func(c *ast.CommClause, kind string, label ast.Expr, chExpr ast.Expr, valExpr string, allowValueLog bool) bool {
 			if c == nil || chExpr == nil || c.Comm == nil {
 				return false
 			}
-			helper := selectRecvHelper
+			helper := selectRecvRegionHelper
 			if kind == "send" {
 				helper = selectSendHelper
 			}
@@ -1306,7 +1618,7 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 					return false
 				}
 				stmt.Rhs[0] = &ast.UnaryExpr{Op: token.ARROW, X: call}
-				if kind == "recv" && valExpr != "" {
+				if kind == "recv" && valExpr != "" && allowValueLog && valueLogsEnabled {
 					ensureImport("fmt")
 					c.Body = append(c.Body, mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s,"value", fmt.Sprint(%s)) }`, ctxName, valExpr)))
 				}
@@ -1316,7 +1628,7 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 			case *ast.ExprStmt:
 				if ue, ok := stmt.X.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
 					ue.X = call
-					if kind == "recv" && valExpr != "" {
+					if kind == "recv" && valExpr != "" && allowValueLog && valueLogsEnabled {
 						ensureImport("fmt")
 						c.Body = append(c.Body, mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s,"value", fmt.Sprint(%s)) }`, ctxName, valExpr)))
 					}
@@ -1365,7 +1677,7 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 				// Function extraction: if gtv:func=Name is set, lift this block via a function wrapper
 				if meta.funcName != "" {
 					// instrument the body before extraction
-					fnBody := instrumentStmts(s.List, ctxName, fnRole)
+					fnBody := instrumentStmts(s.List, ctxName, fnRole, inLoop, wgInScope)
 					// define the function once: func Name(ctx context.Context, fn func()) { fn() }
 					if !generated[meta.funcName] {
 						newFn := &ast.FuncDecl{
@@ -1401,11 +1713,13 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 					continue
 				}
 				// otherwise, recurse into block
-				s.List = instrumentStmts(s.List, ctxName, fnRole)
+				s.List = instrumentStmts(s.List, ctxName, fnRole, inLoop, wgInScope)
 				outs = append(outs, st)
 			case *ast.GoStmt:
 				// Ensure goroutine contributes to WaitGroup
-				usedWG = true
+				if wgInScope {
+					usedWG = true
+				}
 				sidName := ""
 				if hasCtx {
 					sidName = gen.next("spawn")
@@ -1427,19 +1741,29 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 					outs = append(outs, parentLog)
 					usedSpawn = true
 				}
-				// Insert wg.Add(1) before the go statement
-				outs = append(outs, mkExpr(fmt.Sprintf("%s.Add(1)", wgName)))
+				if wgInScope {
+					// Insert wg.Add(1) before the go statement
+					outs = append(outs, mkExpr(fmt.Sprintf("%s.Add(1)", wgName)))
+				}
 				// Modify the goroutine to call Done() at exit without mutating original node
 				if ce := s.Call; ce != nil {
 					switch fun := ce.Fun.(type) {
 					case *ast.FuncLit:
+						litCtxName := ctxNameFromParams(fun.Type.Params)
+						if litCtxName == "" {
+							litCtxName = ctxName
+						}
+						funBody := instrumentStmts(fun.Body.List, litCtxName, fnRole, inLoop, wgInScope)
 						// clone the func literal header and body list (shallow) to avoid side effects
-						bodyStmts := []ast.Stmt{&ast.DeferStmt{Call: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent(wgName), Sel: ast.NewIdent("Done")}}}}
+						bodyStmts := []ast.Stmt{}
+						if wgInScope {
+							bodyStmts = append(bodyStmts, &ast.DeferStmt{Call: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent(wgName), Sel: ast.NewIdent("Done")}}})
+						}
 						if hasCtx && sidName != "" {
 							childLog := mkExpr(fmt.Sprintf(`trace.Log(%s, "spawn_child", fmt.Sprintf("sid=%%d", %s))`, ctxName, sidName))
 							bodyStmts = append(bodyStmts, childLog)
 						}
-						bodyStmts = append(bodyStmts, fun.Body.List...)
+						bodyStmts = append(bodyStmts, funBody...)
 						newFun := &ast.FuncLit{Type: fun.Type, Body: &ast.BlockStmt{List: bodyStmts}}
 						newGo := &ast.GoStmt{Call: &ast.CallExpr{Fun: newFun, Args: ce.Args}}
 						outs = append(outs, newGo)
@@ -1447,7 +1771,10 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 						// wrap any other call into a func literal to add defer wg.Done()
 						callCopy := *ce
 						lit := &ast.FuncLit{Type: &ast.FuncType{Params: &ast.FieldList{}}, Body: &ast.BlockStmt{List: []ast.Stmt{&ast.ExprStmt{X: &callCopy}}}}
-						bodyStmts := []ast.Stmt{&ast.DeferStmt{Call: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent(wgName), Sel: ast.NewIdent("Done")}}}}
+						bodyStmts := []ast.Stmt{}
+						if wgInScope {
+							bodyStmts = append(bodyStmts, &ast.DeferStmt{Call: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent(wgName), Sel: ast.NewIdent("Done")}}})
+						}
 						if hasCtx && sidName != "" {
 							childLog := mkExpr(fmt.Sprintf(`trace.Log(%s, "spawn_child", fmt.Sprintf("sid=%%d", %s))`, ctxName, sidName))
 							bodyStmts = append(bodyStmts, childLog)
@@ -1490,21 +1817,55 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 					if valExpr == "" {
 						valExpr = exprString(s.Value)
 					}
-					if valExpr != "" && (opts.Level == "regions_logs" || opts.Level == "") {
+					if valExpr != "" && valueLogsEnabled {
 						ensureImport("fmt")
 						outs = append(outs, mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s, "value", fmt.Sprint(%s)) }`, ctxName, valExpr)))
 					}
-					// Log channel pointer identity before entering the region
-					ensureImport("fmt")
-					ptrLog := mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s, "ch_ptr", fmt.Sprintf("ptr=%%p", %s)) }`, ctxName, exprString(s.Chan)))
 					blk := &ast.BlockStmt{List: []ast.Stmt{st}}
-					outs = append(outs, ptrLog)
+					// ch_ptr logs are injected in a dedicated post-pass (ensureChPtrLogs)
+					// to keep a single canonical pointer log before each region.
 					outs = append(outs, wrapWithRegionExprGuarded(lbl, blk, gated))
 				} else {
 					outs = append(outs, st)
 				}
 
+			case *ast.DeferStmt:
+				// Instrument sync defers (e.g. defer wg.Done()) at execution-time by
+				// wrapping them in a deferred closure with a regioned call.
+				if s.Call != nil {
+					if label, ok := syncRegionLabelForCall(s.Call); ok && hasCtx {
+						if len(s.Call.Args) == 0 {
+							lbl := &ast.BasicLit{Kind: token.STRING, Value: fmt.Sprintf("%q", label)}
+							callCopy, ok := cloneExpr(s.Call).(*ast.CallExpr)
+							if !ok || callCopy == nil {
+								callCopy = s.Call
+							}
+							callStmt := &ast.ExprStmt{X: callCopy}
+							regionStmt := wrapWithRegionExprGuarded(lbl, &ast.BlockStmt{List: []ast.Stmt{callStmt}}, false)
+							deferLit := &ast.FuncLit{
+								Type: &ast.FuncType{Params: &ast.FieldList{}},
+								Body: &ast.BlockStmt{List: []ast.Stmt{regionStmt}},
+							}
+							outs = append(outs, &ast.DeferStmt{Call: &ast.CallExpr{Fun: deferLit}})
+							continue
+						}
+						warnings = append(warnings, fmt.Sprintf("gtv:defer sync instrumentation skipped at %s (arguments not yet supported)", posString(s)))
+					}
+					// Recurse into deferred func literals so nested channel/sync ops are instrumented.
+					if lit, ok := s.Call.Fun.(*ast.FuncLit); ok && lit != nil && lit.Body != nil {
+						lit.Body.List = instrumentStmts(lit.Body.List, ctxName, fnRole, inLoop, wgInScope)
+					}
+				}
+				outs = append(outs, st)
+
 			case *ast.ExprStmt:
+				if ce, ok := s.X.(*ast.CallExpr); ok {
+					if label, ok := syncRegionLabelForCall(ce); ok {
+						lbl := &ast.BasicLit{Kind: token.STRING, Value: fmt.Sprintf("%q", label)}
+						outs = append(outs, wrapWithRegionExprGuarded(lbl, &ast.BlockStmt{List: []ast.Stmt{st}}, false))
+						continue
+					}
+				}
 				// possible bare receive: <-ch
 				if ue, ok := s.X.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
 					var lbl ast.Expr
@@ -1528,17 +1889,12 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 						ensureImport("fmt")
 					}
 					if hasCtx {
-						gated := opts.GuardDynamicLabels && needFmt
-						valExpr := meta.value
-						ensureImport("fmt")
-						ptrLog := mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s, "ch_ptr", fmt.Sprintf("ptr=%%p", %s)) }`, ctxName, exprString(ue.X)))
-						blockStmts := []ast.Stmt{st}
-						if valExpr != "" && (opts.Level == "regions_logs" || opts.Level == "") {
-							blockStmts = append(blockStmts, mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s, "value", fmt.Sprint(%s)) }`, ctxName, valExpr)))
+						call := &ast.CallExpr{
+							Fun:  ast.NewIdent(recvValueHelper),
+							Args: []ast.Expr{ctxExpr, lbl, cloneExpr(ue.X)},
 						}
-						blk := &ast.BlockStmt{List: blockStmts}
-						outs = append(outs, ptrLog)
-						outs = append(outs, wrapWithRegionExprGuarded(lbl, blk, gated))
+						outs = append(outs, &ast.ExprStmt{X: call})
+						recvHelperNeeded = true
 					} else {
 						outs = append(outs, st)
 					}
@@ -1613,20 +1969,18 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 							ensureImport("fmt")
 						}
 						if hasCtx {
-							gated := opts.GuardDynamicLabels && needFmt
-							valExpr := meta.value
-							if valExpr == "" && len(s.Lhs) > 0 {
-								valExpr = exprString(s.Lhs[0])
+							helperName := recvValueHelper
+							if len(s.Lhs) >= 2 {
+								helperName = recvValueOkHelper
 							}
-							ensureImport("fmt")
-							ptrLog := mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s, "ch_ptr", fmt.Sprintf("ptr=%%p", %s)) }`, ctxName, exprString(ue.X)))
-							blockStmts := []ast.Stmt{st}
-							if valExpr != "" && (opts.Level == "regions_logs" || opts.Level == "") {
-								blockStmts = append(blockStmts, mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s, "value", fmt.Sprint(%s)) }`, ctxName, valExpr)))
+							call := &ast.CallExpr{
+								Fun:  ast.NewIdent(helperName),
+								Args: []ast.Expr{ctxExpr, lbl, cloneExpr(ue.X)},
 							}
-							blk := &ast.BlockStmt{List: blockStmts}
-							outs = append(outs, ptrLog)
-							outs = append(outs, wrapWithRegionExprGuarded(lbl, blk, gated))
+							stmt := *s
+							stmt.Rhs = []ast.Expr{call}
+							outs = append(outs, &stmt)
+							recvHelperNeeded = true
 						} else {
 							outs = append(outs, st)
 						}
@@ -1790,15 +2144,66 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 				}
 				outs = append(outs, st)
 			case *ast.IfStmt:
-				s.Body.List = instrumentStmts(s.Body.List, ctxName, fnRole)
+				s.Body.List = instrumentStmts(s.Body.List, ctxName, fnRole, inLoop, wgInScope)
 				if s.Else != nil {
 					if b, ok := s.Else.(*ast.BlockStmt); ok {
-						b.List = instrumentStmts(b.List, ctxName, fnRole)
+						b.List = instrumentStmts(b.List, ctxName, fnRole, inLoop, wgInScope)
 					}
 				}
 				outs = append(outs, st)
 
 			case *ast.RangeStmt:
+				// Handle channel range: rewrite to explicit recv with ok so we can instrument.
+				if hasCtx && isChanRange(s.X) {
+					prefix := "worker"
+					if fnRole != "" {
+						prefix = fnRole
+					}
+					lbl, needFmt := labelFromChan(s.X)
+					lbl = addPrefix(lbl, prefix+": receive from ")
+					if needFmt {
+						ensureImport("fmt")
+					}
+					recvHelperNeeded = true
+					okName := gen.next("ok")
+					assignTok := s.Tok
+					keyExpr := s.Key
+					if keyExpr == nil {
+						keyExpr = ast.NewIdent("_")
+					}
+					if assignTok != token.DEFINE && assignTok != token.ASSIGN {
+						assignTok = token.DEFINE
+					}
+					recvCall := &ast.CallExpr{
+						Fun:  ast.NewIdent(recvValueOkHelper),
+						Args: []ast.Expr{ctxExpr, lbl, cloneExpr(s.X)},
+					}
+					assign := &ast.AssignStmt{
+						Lhs: []ast.Expr{keyExpr, ast.NewIdent(okName)},
+						Tok: assignTok,
+						Rhs: []ast.Expr{recvCall},
+					}
+					check := &ast.IfStmt{
+						Cond: &ast.UnaryExpr{Op: token.NOT, X: ast.NewIdent(okName)},
+						Body: &ast.BlockStmt{List: []ast.Stmt{&ast.BranchStmt{Tok: token.BREAK}}},
+					}
+					bodyStmts := instrumentStmts(s.Body.List, ctxName, fnRole, true, wgInScope)
+					newBody := &ast.BlockStmt{List: append([]ast.Stmt{assign, check}, bodyStmts...)}
+					forStmt := &ast.ForStmt{Body: newBody}
+					if assignTok == token.ASSIGN {
+						decl := &ast.DeclStmt{Decl: &ast.GenDecl{
+							Tok: token.VAR,
+							Specs: []ast.Spec{&ast.ValueSpec{
+								Names: []*ast.Ident{ast.NewIdent(okName)},
+								Type:  ast.NewIdent("bool"),
+							}},
+						}}
+						outs = append(outs, decl, forStmt)
+					} else {
+						outs = append(outs, forStmt)
+					}
+					continue
+				}
 				if s.Body != nil {
 					// Heuristic: inject loop variable capture copies into goroutine func literals
 					var names []string
@@ -1844,7 +2249,7 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 						if meta.loop != "" && hasCtx {
 							warnings = append(warnings, fmt.Sprintf("gtv:loop ignored at %s (body not safe and not forceable)", posString(s)))
 						}
-						s.Body.List = instrumentStmts(s.Body.List, ctxName, fnRole)
+						s.Body.List = instrumentStmts(s.Body.List, ctxName, fnRole, true, wgInScope)
 					}
 				}
 				outs = append(outs, st)
@@ -1907,7 +2312,7 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 						if meta.loop != "" && hasCtx {
 							warnings = append(warnings, fmt.Sprintf("gtv:loop ignored at %s (body not safe and not forceable)", posString(s)))
 						}
-						s.Body.List = instrumentStmts(s.Body.List, ctxName, fnRole)
+						s.Body.List = instrumentStmts(s.Body.List, ctxName, fnRole, true, wgInScope)
 					}
 				}
 				outs = append(outs, st)
@@ -1915,7 +2320,7 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 				if s.Body != nil {
 					for _, cc := range s.Body.List {
 						if c, ok := cc.(*ast.CaseClause); ok {
-							c.Body = instrumentStmts(c.Body, ctxName, fnRole)
+							c.Body = instrumentStmts(c.Body, ctxName, fnRole, inLoop, wgInScope)
 						}
 					}
 				}
@@ -1930,35 +2335,55 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 					selVar = gen.next("sel")
 				}
 				if s.Body != nil {
+					caseIdx := 0
 					for _, cc := range s.Body.List {
 						if c, ok := cc.(*ast.CommClause); ok {
 							rewriteSelectClauseAssign(c)
-							c.Body = instrumentStmts(c.Body, ctxName, fnRole)
+							c.Body = instrumentStmts(c.Body, ctxName, fnRole, inLoop, wgInScope)
 							appliedSelectRegion := false
 							if hasCtx && c.Comm != nil {
 								cmts := commentText(leadingCommentGroup(c))
 								clauseMeta := parseAnn(cmts)
 								kind, chExpr, valExpr := detectSelectComm(c.Comm, clauseMeta)
-								if kind != "" && chExpr != nil && clauseBodySafe(&ast.BlockStmt{List: c.Body}) {
+								if kind != "" && chExpr != nil {
+									if isTimerChanExpr(chExpr) {
+										appliedSelectRegion = true
+										goto nextClause
+									}
 									lbl, needFmt := buildSendRecvLabel(kind, chExpr, clauseMeta, fnRole)
 									if needFmt {
 										ensureImport("fmt")
 									}
-									if rewriteSelectClauseWithHelper(c, kind, lbl, chExpr, valExpr) {
+									bodySafe := clauseBodySafe(&ast.BlockStmt{List: c.Body})
+									if rewriteSelectClauseWithHelper(c, kind, lbl, chExpr, valExpr, bodySafe) {
 										appliedSelectRegion = true
+										if bodySafe {
+											gated := opts.GuardDynamicLabels && needFmt
+											c.Body = []ast.Stmt{wrapWithRegionExprGuarded(lbl, &ast.BlockStmt{List: c.Body}, gated)}
+										}
+									}
+									logStmt := mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s, "select_%s", fmt.Sprintf("ptr=%%p name=%%q", %s, %s)) }`, ctxName, kind, exprString(chExpr), exprString(lbl)))
+									if needSelectLog {
+										selectCase := mkStmt(fmt.Sprintf(`if trace.IsEnabled(){ trace.Log(%s, "select", fmt.Sprintf("select_case id=%%s idx=%d kind=%s ptr=%%p name=%%q", %s, %s, %s)) }`, ctxName, caseIdx, kind, selVar, exprString(chExpr), exprString(lbl)))
+										c.Body = append([]ast.Stmt{selectCase, logStmt}, c.Body...)
+									} else {
+										c.Body = append([]ast.Stmt{logStmt}, c.Body...)
 									}
 								}
 							}
 							if needSelectLog && c.Comm != nil {
-								chosen := mkStmt(fmt.Sprintf("if trace.IsEnabled(){ trace.Log(%s, \"select\", \"select_chosen id=\"+%s) }", ctxName, selVar))
+								chosen := mkStmt(fmt.Sprintf("if trace.IsEnabled(){ trace.Log(%s, \"select\", fmt.Sprintf(\"select_chosen id=%%s idx=%d\", %s)) }", ctxName, caseIdx, selVar))
 								c.Body = append([]ast.Stmt{chosen}, c.Body...)
 							}
+						nextClause:
 							if !appliedSelectRegion {
 								wrapSelectReceive(c)
 							}
 						}
+						caseIdx++
 					}
 				}
+				addSelectDefaultBackoff(s)
 				if needSelectLog {
 					sidDecl := mkStmt(fmt.Sprintf("%s := fmt.Sprintf(\"s%%v\", time.Now().UnixNano())", selVar))
 					beginLog := mkStmt(fmt.Sprintf("if trace.IsEnabled(){ trace.Log(%s, \"select\", \"select_begin id=\"+%s) }", ctxName, selVar))
@@ -2040,7 +2465,8 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 			allowBareReturn = true
 		}
 		if opts.Level != "tasks_only" {
-			fn.Body.List = instrumentStmts(fn.Body.List, ctxName, fRole)
+			wgInScope := fn == runFn
+			fn.Body.List = instrumentStmts(fn.Body.List, ctxName, fRole, false, wgInScope)
 		}
 	}
 
@@ -2110,9 +2536,9 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 						Type:  &ast.SelectorExpr{X: ast.NewIdent("context"), Sel: ast.NewIdent("Context")},
 					}}, fun.Type.Params.List...)
 				}
-				// ensure call has ctx argument
-				if !(len(ce.Args) > 0 && isCtxArg(ce.Args[len(ce.Args)-1], ctxName)) {
-					ce.Args = append(ce.Args, ast.NewIdent(ctxName))
+				// ensure call has ctx argument in first position (matches added ctx param)
+				if !(len(ce.Args) > 0 && isCtxArg(ce.Args[0], ctxName)) {
+					ce.Args = append([]ast.Expr{ast.NewIdent(ctxName)}, ce.Args...)
 				}
 				// Optional goroutine region wrapping for func literals
 				if opts.AddGoroutineRegions {
@@ -2253,11 +2679,19 @@ func InstrumentProgram(src []byte, name string) ([]byte, error) {
 	}
 
 	ensureChPtrLogs(file, ensureImport, ctxNameByFunc)
+	if recvHelperNeeded {
+		ensureImport("context")
+		ensureImport("fmt")
+		recvHelperCtx := gen.next("ctx")
+		for _, decl := range recvHelperDecls(recvValueHelper, recvValueOkHelper, recvHelperCtx, valueLogsEnabled) {
+			file.Decls = append(file.Decls, decl)
+		}
+	}
 	if selectHelperNeeded {
 		ensureImport("context")
 		ensureImport("fmt")
 		selectHelperCtx := gen.next("ctx")
-		for _, decl := range selectHelperDecls(selectRecvHelper, selectSendHelper, selectHelperCtx) {
+		for _, decl := range selectHelperDecls(selectRecvHelper, selectRecvRegionHelper, selectSendHelper, selectHelperCtx) {
 			file.Decls = append(file.Decls, decl)
 		}
 	}
@@ -2524,7 +2958,7 @@ func ensureChPtrLogs(file *ast.File, ensureImport func(string), ctxNameByFunc ma
 	}
 }
 
-func selectHelperDecls(recvName, sendName, ctxName string) []ast.Decl {
+func selectHelperDecls(recvName, recvRegionName, sendName, ctxName string) []ast.Decl {
 	helpers := fmt.Sprintf(`
 package helper
 
@@ -2537,7 +2971,14 @@ func %s[T any](%s context.Context, label string, ch <-chan T) <-chan T {
 		trace.Log(%s, "ch_ptr", fmt.Sprintf("ptr=%%p", ch))
 		trace.Log(%s, "ch_name", fmt.Sprintf("ptr=%%p name=%%s", ch, label))
 	}
-	trace.WithRegion(%s, label, func() {})
+	return ch
+}
+
+func %s[T any](%s context.Context, label string, ch <-chan T) <-chan T {
+	if trace.IsEnabled() {
+		trace.Log(%s, "ch_ptr", fmt.Sprintf("ptr=%%p", ch))
+		trace.Log(%s, "ch_name", fmt.Sprintf("ptr=%%p name=%%s", ch, label))
+	}
 	return ch
 }
 
@@ -2546,12 +2987,73 @@ func %s[T any](%s context.Context, label string, ch chan<- T) chan<- T {
 		trace.Log(%s, "ch_ptr", fmt.Sprintf("ptr=%%p", ch))
 		trace.Log(%s, "ch_name", fmt.Sprintf("ptr=%%p name=%%s", ch, label))
 	}
-	trace.WithRegion(%s, label, func() {})
 	return ch
 }
-`, recvName, ctxName, ctxName, ctxName, ctxName, sendName, ctxName, ctxName, ctxName, ctxName)
+
+`, recvName, ctxName, ctxName, ctxName, recvRegionName, ctxName, ctxName, ctxName, sendName, ctxName, ctxName, ctxName)
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "gtv_select_helpers.go", helpers, parser.ParseComments)
+	if err != nil {
+		panic(err)
+	}
+	var decls []ast.Decl
+	for _, d := range file.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok {
+			decls = append(decls, fn)
+		}
+	}
+	return decls
+}
+
+func recvHelperDecls(valueName, valueOkName, ctxName string, valueLogsEnabled bool) []ast.Decl {
+	valueLogStmt := ""
+	valueOkLogStmt := ""
+	if valueLogsEnabled {
+		valueLogStmt = fmt.Sprintf(`
+	if trace.IsEnabled() {
+		trace.Log(%s, "value", fmt.Sprint(v))
+	}`, ctxName)
+		valueOkLogStmt = fmt.Sprintf(`
+	if ok && trace.IsEnabled() {
+		trace.Log(%s, "value", fmt.Sprint(v))
+	}`, ctxName)
+	}
+	helpers := fmt.Sprintf(`
+package helper
+
+import "context"
+import "fmt"
+import "runtime/trace"
+
+func %s[T any](%s context.Context, label string, ch <-chan T) T {
+	if trace.IsEnabled() {
+		trace.Log(%s, "ch_ptr", fmt.Sprintf("ptr=%%p", ch))
+		trace.Log(%s, "ch_name", fmt.Sprintf("ptr=%%p name=%%s", ch, label))
+	}
+	var v T
+	trace.WithRegion(%s, label, func() {
+		v = <-ch
+	})
+	%s
+	return v
+}
+
+func %s[T any](%s context.Context, label string, ch <-chan T) (T, bool) {
+	if trace.IsEnabled() {
+		trace.Log(%s, "ch_ptr", fmt.Sprintf("ptr=%%p", ch))
+		trace.Log(%s, "ch_name", fmt.Sprintf("ptr=%%p name=%%s", ch, label))
+	}
+	var v T
+	var ok bool
+	trace.WithRegion(%s, label, func() {
+		v, ok = <-ch
+	})
+	%s
+	return v, ok
+}
+`, valueName, ctxName, ctxName, ctxName, ctxName, valueLogStmt, valueOkName, ctxName, ctxName, ctxName, ctxName, valueOkLogStmt)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "gtv_recv_helpers.go", helpers, parser.ParseComments)
 	if err != nil {
 		panic(err)
 	}
@@ -2665,11 +3167,26 @@ func regionCallFromExpr(expr ast.Expr) *ast.CallExpr {
 }
 
 func isChPtrLog(stmt ast.Stmt) bool {
-	expr, ok := stmt.(*ast.ExprStmt)
-	if !ok {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		return isChPtrLogExpr(s.X)
+	case *ast.BlockStmt:
+		if s == nil || len(s.List) != 1 {
+			return false
+		}
+		return isChPtrLog(s.List[0])
+	case *ast.IfStmt:
+		if s == nil || s.Else != nil || s.Body == nil || len(s.Body.List) != 1 {
+			return false
+		}
+		return isChPtrLog(s.Body.List[0])
+	default:
 		return false
 	}
-	call, ok := expr.X.(*ast.CallExpr)
+}
+
+func isChPtrLogExpr(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}

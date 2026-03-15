@@ -23,6 +23,15 @@ const (
 	auditSkipPairingHardcoded                   = "skip_pairing_hardcoded"
 	auditSkipPairingEnv                         = "skip_pairing_env"
 	auditUnparsedRegionOp                       = "unparsed_region_op"
+	auditParsedRegionSend                       = "parsed_region_send"
+	auditParsedRegionRecv                       = "parsed_region_recv"
+	auditSelectCaseSeen                         = "select_case_seen"
+	auditSelectChosenSeen                       = "select_chosen_seen"
+	auditSelectChosenMissingCase                = "select_chosen_missing_case"
+	auditSelectChosenEmittedSend                = "select_chosen_emitted_chan_send"
+	auditSelectChosenEmittedRecv                = "select_chosen_emitted_chan_recv"
+	auditMissingChannelIdentity                 = "missing_channel_identity"
+	auditMissingBlockChannel                    = "missing_block_channel"
 )
 
 func init() {
@@ -43,6 +52,8 @@ type TimelineEvent struct {
 	Event      string  `json:"event"`
 	G          int64   `json:"g"`
 	Func       string  `json:"func,omitempty"`
+	File       string  `json:"file,omitempty"`
+	Line       int     `json:"line,omitempty"`
 	Channel    string  `json:"channel,omitempty"`
 	ChannelKey string  `json:"channel_key,omitempty"`
 	Role       string  `json:"role,omitempty"`
@@ -63,17 +74,72 @@ type TimelineEvent struct {
 	ElemType   string  `json:"elem_type,omitempty"`
 	ChPtr      string  `json:"ch_ptr,omitempty"`
 	MissingPtr bool    `json:"missing_ptr,omitempty"`
+	// Optional blocking/diagnostic fields
+	BlockKind       string `json:"block_kind,omitempty"`
+	UnblockKind     string `json:"unblock_kind,omitempty"`
+	BlockCause      string `json:"block_cause,omitempty"`
+	BlockLen        int    `json:"block_len,omitempty"`
+	BlockCap        int    `json:"block_cap,omitempty"`
+	ChannelID       string `json:"channel_id,omitempty"`
+	Confidence      string `json:"confidence,omitempty"`
+	UnknownSender   bool   `json:"unknown_sender,omitempty"`
+	UnknownReceiver bool   `json:"unknown_receiver,omitempty"`
+	UnknownChannel  bool   `json:"unknown_channel,omitempty"`
 	// Optional select fields
-	SelectID string `json:"select_id,omitempty"`
-	Dropped  bool   `json:"select_dropped,omitempty"`
+	SelectID    string `json:"select_id,omitempty"`
+	SelectKind  string `json:"select_kind,omitempty"`
+	SelectIndex int    `json:"select_index,omitempty"`
+	Dropped     bool   `json:"select_dropped,omitempty"`
 }
 
 const TimelineSchemaVersion = 1
 
 type TimelineEnvelope struct {
 	SchemaVersion int             `json:"schema_version"`
+	Capabilities  []string        `json:"capabilities,omitempty"`
 	Events        []TimelineEvent `json:"events"`
+	Entities      *EntitiesTable  `json:"entities,omitempty"`
 	Warnings      []string        `json:"warnings,omitempty"`
+	WarningsV2    []WarningEntry  `json:"warnings_v2,omitempty"`
+}
+
+type WarningEntry struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type EntitiesTable struct {
+	Goroutines []GoroutineEntity `json:"goroutines,omitempty"`
+	Channels   []ChannelEntity   `json:"channels,omitempty"`
+}
+
+type GoroutineEntity struct {
+	GID       int64  `json:"gid"`
+	ParentGID int64  `json:"parent_gid,omitempty"`
+	Func      string `json:"func,omitempty"`
+	Role      string `json:"role,omitempty"`
+}
+
+type ChannelEntity struct {
+	ChanID   string   `json:"chan_id"`
+	Name     string   `json:"name,omitempty"`
+	ElemType string   `json:"elem_type,omitempty"`
+	Cap      int      `json:"cap,omitempty"`
+	ChPtr    string   `json:"ch_ptr,omitempty"`
+	Aliases  []string `json:"aliases,omitempty"`
+}
+
+type ChannelUnmatchedAudit struct {
+	ChanID         string `json:"chan_id"`
+	UnmatchedSends int64  `json:"unmatched_sends"`
+	UnmatchedRecvs int64  `json:"unmatched_recvs"`
+	MatchedPairs   int64  `json:"matched_pairs"`
+}
+
+type UnmatchedTotals struct {
+	Sends            int64 `json:"sends"`
+	Recvs            int64 `json:"recvs"`
+	UnknownChannelID int64 `json:"unknown_channel_id"`
 }
 
 // Options control live/offline behavior.
@@ -84,6 +150,8 @@ type Options struct {
 	DropBlockNoCh bool
 	// If true, emit atomic attempt/commit and block/unblock events in addition to legacy events.
 	EmitAtomic bool
+	// Mode controls filtering of events ("teach" for minimal MVP, "debug" for full detail).
+	Mode string
 	// GoroutineFilter controls which goroutines are tracked.
 	GoroutineFilter GoroutineFilterMode
 }
@@ -109,10 +177,110 @@ func ParseGoroutineFilterMode(value string) GoroutineFilterMode {
 	}
 }
 
+func normalizeMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "teach", "teaching":
+		return "teach"
+	case "debug":
+		return "debug"
+	default:
+		return ""
+	}
+}
+
+func FilterTimelineEventForMode(ev TimelineEvent, mode string) (TimelineEvent, bool, string) {
+	if normalizeMode(mode) != "teach" {
+		return ev, true, ""
+	}
+	name := strings.ToLower(ev.Event)
+	// In teach mode, drop low-level commit/complete variants to avoid
+	// duplicate chan_send/chan_recv visuals when paired events are present.
+	switch name {
+	case "chan_send_commit", "chan_recv_commit", "send_complete", "recv_complete":
+		return ev, false, name
+	}
+	allow := map[string]string{
+		"goroutine_created":   "go_create",
+		"goroutine_started":   "go_start",
+		"go_create":           "go_create",
+		"go_start":            "go_start",
+		"spawn":               "spawn",
+		"channels_created":    "channels_created",
+		"worker_starting":     "worker_starting",
+		"mutex_lock":          "mutex_lock",
+		"mutex_unlock":        "mutex_unlock",
+		"rwmutex_lock":        "rwmutex_lock",
+		"rwmutex_unlock":      "rwmutex_unlock",
+		"rwmutex_rlock":       "rwmutex_rlock",
+		"rwmutex_runlock":     "rwmutex_runlock",
+		"wg_add":              "wg_add",
+		"wg_done":             "wg_done",
+		"wg_wait":             "wg_wait",
+		"cond_wait":           "cond_wait",
+		"cond_signal":         "cond_signal",
+		"cond_broadcast":      "cond_broadcast",
+		"chan_make":           "chan_make",
+		"chan_send":           "chan_send",
+		"chan_recv":           "chan_recv",
+		"blocked_send":        "block_send",
+		"blocked_receive":     "block_recv",
+		"block_send":          "block_send",
+		"block_recv":          "block_recv",
+		"go_block":            "go_block",
+		"go_unblock":          "go_unblock",
+		"unblock":             "unblock",
+		"unblocked":           "unblock",
+		"select_chosen":       "select_chosen",
+		"audit_summary":       "audit_summary",
+		"warn_quiescence":     "warn_quiescence",
+		"warn_deadlock_cycle": "warn_deadlock_cycle",
+	}
+	mapped, ok := allow[name]
+	if !ok {
+		return ev, false, name
+	}
+	ev.Event = mapped
+	return ev, true, ""
+}
+
+func AnnotateUnknownEndpoints(ev TimelineEvent) TimelineEvent {
+	name := strings.ToLower(ev.Event)
+	if isChannelEvent(name) && timelineChannelIdentity(ev) == "" {
+		ev.UnknownChannel = true
+	}
+	switch name {
+	case "chan_send":
+		if ev.PeerG == 0 && ev.PairID == "" && ev.MsgID == 0 {
+			ev.UnknownReceiver = true
+		}
+	case "chan_recv":
+		if ev.PeerG == 0 && ev.PairID == "" && ev.MsgID == 0 {
+			ev.UnknownSender = true
+		}
+	}
+	return ev
+}
+
 // ParseState holds per-connection parsing state.
-type op struct{ kind, ch, ptr string }
+type op struct {
+	kind string
+	ch   string
+	ptr  string
+	time float64
+}
 type skey struct{ Ev, Ch string }
 type OpKey string
+
+type SelectCaseInfo struct {
+	Kind   string
+	ChPtr  string
+	ChKey  string
+	ChName string
+	Role   string
+	G      int64
+	TimeNs int64
+	Index  int
+}
 
 type ParseState struct {
 	Roles      map[int64]string
@@ -139,6 +307,16 @@ type ParseState struct {
 
 	// Region pairing (send → recv) bookkeeping by channel key
 	sendsByKey map[OpKey][]sendRecord
+	// Pending select recv with no matching send yet (by channel key)
+	pendingSelectRecv map[OpKey]int
+	// Pending recv with no matching send yet (by channel key)
+	pendingRecvByKey map[OpKey][]pendingRecvRecord
+	// Unmatched recv counts by channel key
+	unmatchedRecvByChannel map[string]int64
+	// Matched pairs by channel key
+	matchedPairsByChannel map[string]int64
+	// Unknown channel identity counts
+	unknownChannelID int64
 
 	// Value notes captured from trace.Log(ctx, "value", ...)
 	lastValue map[int64]string
@@ -162,7 +340,15 @@ type ParseState struct {
 	sndAttQ map[OpKey][]string // queue of send attempt ids by channel
 	rcvAttQ map[OpKey][]string // queue of recv attempt ids by channel
 	// Track current blocked reason/channel for a goroutine (best-effort)
-	blocked map[int64]struct{ Reason, Ch string }
+	blocked map[int64]struct{ Reason, Ch, ChannelID, Confidence string }
+	// Block duration tracking
+	blockedAt            map[int64]float64
+	blockedReasonByG     map[int64]string
+	blockedTotalMs       map[int64]float64
+	blockedTotalByReason map[string]float64
+	lastProgressMs       float64
+	// Most recent sync wait region by goroutine; used to attribute mutex/wg unblock events.
+	syncWaitCandidateByG map[int64]syncWaitCandidate
 	// Spawn relationships by SID from instrumentation logs
 	spawnParentBySID map[string]int64
 
@@ -170,7 +356,18 @@ type ParseState struct {
 	activeSelect   map[int64]string    // gid -> select id
 	selCandidates  map[string][]string // select id -> attempt ids
 	selChosen      map[string]string   // select id -> chosen attempt id
+	selChosenIdx   map[string]int      // select id -> chosen case idx
+	selPending     map[string]bool     // select id -> chosen seen before case
 	selectFallback map[int64]string    // gid -> select id tracked for fallback
+	selectCases    map[string][]SelectCaseInfo
+	selectEmitted  map[string]bool
+	selectMeta     map[string]struct {
+		G      int64
+		TimeNs int64
+	}
+	// Recent select choice (used to ignore select-clause body regions that look like send/recv ops).
+	lastSelectChosenByG    map[int64]SelectCaseInfo
+	lastSelectChosenSeqByG map[int64]int64
 
 	// Channel identity + buffering
 	// Channel identity by pointer (if instrumented via logs); keyed by logical channel key
@@ -187,6 +384,25 @@ type ParseState struct {
 
 	// Message pairing id counter
 	nextMsgID int64
+
+	unparsedRegionSamples []string
+
+	// Deadlock/cycle inference
+	lastSendByChannel map[string]lastOpInfo
+	lastRecvByChannel map[string]lastOpInfo
+	deadlockCycle     map[string]any
+}
+
+type lastOpInfo struct {
+	G      int64
+	TimeMs float64
+}
+
+type syncWaitCandidate struct {
+	Kind       string
+	Channel    string
+	ChannelKey string
+	StartMs    float64
 }
 
 type pendingGoroutine struct {
@@ -200,22 +416,26 @@ type pendingGoroutine struct {
 // NewParseState creates a fresh parser state.
 func NewParseState(opt Options) *ParseState {
 	return &ParseState{
-		Roles:             make(map[int64]string),
-		Interested:        make(map[int64]struct{}),
-		Active:            make(map[int64]op),
-		Last:              make(map[int64]op),
-		pendingGoroutines: make(map[int64]pendingGoroutine),
-		auditCounts:       make(map[string]int64),
-		hasSend:           make(map[skey]bool),
-		Opt:               opt,
-		sendsByKey:        make(map[OpKey][]sendRecord),
-		lastChPtrByG:      make(map[int64]string),
-		lastChPtrSeqByG:   make(map[int64]int64),
-		lastChNameByG:     make(map[int64]string),
-		lastChNameSeqByG:  make(map[int64]int64),
-		eventIndexByG:     make(map[int64]int64),
-		lastValue:         make(map[int64]string),
-		activeAttempt:     make(map[int64]string),
+		Roles:                  make(map[int64]string),
+		Interested:             make(map[int64]struct{}),
+		Active:                 make(map[int64]op),
+		Last:                   make(map[int64]op),
+		pendingGoroutines:      make(map[int64]pendingGoroutine),
+		auditCounts:            make(map[string]int64),
+		hasSend:                make(map[skey]bool),
+		Opt:                    opt,
+		sendsByKey:             make(map[OpKey][]sendRecord),
+		pendingSelectRecv:      make(map[OpKey]int),
+		pendingRecvByKey:       make(map[OpKey][]pendingRecvRecord),
+		unmatchedRecvByChannel: make(map[string]int64),
+		matchedPairsByChannel:  make(map[string]int64),
+		lastChPtrByG:           make(map[int64]string),
+		lastChPtrSeqByG:        make(map[int64]int64),
+		lastChNameByG:          make(map[int64]string),
+		lastChNameSeqByG:       make(map[int64]int64),
+		eventIndexByG:          make(map[int64]int64),
+		lastValue:              make(map[int64]string),
+		activeAttempt:          make(map[int64]string),
 		attemptsByG: make(map[int64]struct {
 			id, ch, kind, ptr string
 			time              float64
@@ -227,18 +447,36 @@ func NewParseState(opt Options) *ParseState {
 			Time float64
 			Ptr  string
 		}),
-		sndAttQ:          make(map[OpKey][]string),
-		rcvAttQ:          make(map[OpKey][]string),
-		blocked:          make(map[int64]struct{ Reason, Ch string }),
-		activeSelect:     make(map[int64]string),
-		selCandidates:    make(map[string][]string),
-		selChosen:        make(map[string]string),
-		selectFallback:   make(map[int64]string),
-		spawnParentBySID: make(map[string]int64),
-		capByPtr:         make(map[string]int),
-		depthByPtr:       make(map[string]int),
-		channelNameByPtr: make(map[string]string),
-		bufSends:         make(map[string]map[string]bool),
+		sndAttQ:              make(map[OpKey][]string),
+		rcvAttQ:              make(map[OpKey][]string),
+		blocked:              make(map[int64]struct{ Reason, Ch, ChannelID, Confidence string }),
+		blockedAt:            make(map[int64]float64),
+		blockedReasonByG:     make(map[int64]string),
+		blockedTotalMs:       make(map[int64]float64),
+		blockedTotalByReason: make(map[string]float64),
+		syncWaitCandidateByG: make(map[int64]syncWaitCandidate),
+		lastSendByChannel:    make(map[string]lastOpInfo),
+		lastRecvByChannel:    make(map[string]lastOpInfo),
+		activeSelect:         make(map[int64]string),
+		selCandidates:        make(map[string][]string),
+		selChosen:            make(map[string]string),
+		selChosenIdx:         make(map[string]int),
+		selPending:           make(map[string]bool),
+		selectFallback:       make(map[int64]string),
+		selectCases:          make(map[string][]SelectCaseInfo),
+		selectEmitted:        make(map[string]bool),
+		selectMeta: make(map[string]struct {
+			G      int64
+			TimeNs int64
+		}),
+		lastSelectChosenByG:    make(map[int64]SelectCaseInfo),
+		lastSelectChosenSeqByG: make(map[int64]int64),
+		spawnParentBySID:       make(map[string]int64),
+		capByPtr:               make(map[string]int),
+		depthByPtr:             make(map[string]int),
+		channelNameByPtr:       make(map[string]string),
+		bufSends:               make(map[string]map[string]bool),
+		nextMsgID:              1,
 	}
 }
 
@@ -246,11 +484,492 @@ func (st *ParseState) incAudit(reason string) {
 	st.auditCounts[reason]++
 }
 
+func (st *ParseState) addBlockedDuration(gid int64, reason string, delta float64) {
+	if delta <= 0 {
+		return
+	}
+	st.blockedTotalMs[gid] += delta
+	if strings.TrimSpace(reason) == "" {
+		reason = "unknown"
+	}
+	st.blockedTotalByReason[reason] += delta
+}
+
+func (st *ParseState) markProgress(ts float64) {
+	if ts > st.lastProgressMs {
+		st.lastProgressMs = ts
+	}
+}
+
+func parsedRegionAuditKey(kind string) string {
+	kind = strings.TrimSpace(strings.ToLower(kind))
+	if kind == "" {
+		return ""
+	}
+	return "parsed_region_" + strings.ReplaceAll(kind, "-", "_")
+}
+
+func syncWaitKindFromRuntimeReason(reason string) string {
+	lr := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(lr, "rwmutex") && strings.Contains(lr, "rlock"):
+		return "rwmutex_rlock"
+	case strings.Contains(lr, "rwmutex") && strings.Contains(lr, "lock"):
+		return "rwmutex_lock"
+	case strings.Contains(lr, "mutex") && strings.Contains(lr, "lock"):
+		return "mutex_lock"
+	case strings.Contains(lr, "waitgroup"):
+		return "wg_wait"
+	case strings.Contains(lr, "cond"):
+		return "cond_wait"
+	default:
+		return ""
+	}
+}
+
+func isSyncWaitKind(kind string) bool {
+	switch kind {
+	case "mutex_lock", "rwmutex_lock", "rwmutex_rlock", "wg_wait", "cond_wait":
+		return true
+	default:
+		return false
+	}
+}
+
+func unblockKindFromReason(reason string) string {
+	switch reason {
+	case "send":
+		return "chan_send"
+	case "recv":
+		return "chan_recv"
+	case "chan_send", "chan_recv", "mutex_lock", "rwmutex_lock", "rwmutex_rlock", "wg_wait", "cond_wait":
+		return reason
+	default:
+		return "unknown"
+	}
+}
+
+func (st *ParseState) recordChannelActivity(kind string, gid int64, channelID string, ts float64) {
+	if channelID == "" {
+		return
+	}
+	record := func(key string) {
+		if key == "" {
+			return
+		}
+		switch kind {
+		case "send":
+			st.lastSendByChannel[key] = lastOpInfo{G: gid, TimeMs: ts}
+		case "recv":
+			st.lastRecvByChannel[key] = lastOpInfo{G: gid, TimeMs: ts}
+		}
+	}
+	record(channelID)
+
+	alias := ""
+	if _, ch, ok := parseRegionOp(channelID); ok && ch != "" && ch != channelID {
+		alias = ch
+		record(ch)
+	}
+
+	if strings.HasPrefix(channelID, "0x") {
+		if name, ok := st.channelNameByPtr[channelID]; ok && name != "" {
+			record(name)
+			if _, ch, ok := parseRegionOp(name); ok && ch != "" {
+				record(ch)
+			}
+		}
+		return
+	}
+
+	nameKey := channelID
+	if alias != "" {
+		nameKey = alias
+	}
+	if nameKey != "" {
+		for ptr, name := range st.channelNameByPtr {
+			if name == nameKey {
+				record(ptr)
+				break
+			}
+		}
+	}
+}
+
+func (st *ParseState) noteUnparsedRegion(label string) {
+	if label == "" {
+		return
+	}
+	const maxSamples = 20
+	if len(st.unparsedRegionSamples) >= maxSamples {
+		return
+	}
+	st.unparsedRegionSamples = append(st.unparsedRegionSamples, label)
+}
+
+func quiescenceThresholdMs() float64 {
+	raw := strings.TrimSpace(os.Getenv("GTV_QUIESCENCE_MS"))
+	if raw == "" {
+		return 500
+	}
+	if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
+		return v
+	}
+	return 500
+}
+
+func (st *ParseState) quiescenceWarningEvent() *TimelineEvent {
+	if st == nil {
+		return nil
+	}
+	threshold := quiescenceThresholdMs()
+	if threshold <= 0 {
+		return nil
+	}
+	if len(st.blocked) == 0 {
+		return nil
+	}
+	if st.lastProgressMs <= 0 {
+		return nil
+	}
+	since := st.lastTimeMs - st.lastProgressMs
+	if since < threshold {
+		return nil
+	}
+	gids := make([]int64, 0, len(st.blocked))
+	for gid := range st.blocked {
+		gids = append(gids, gid)
+	}
+	sort.Slice(gids, func(i, j int) bool { return gids[i] < gids[j] })
+	payload := map[string]any{
+		"since_ms":      since,
+		"blocked_count": len(gids),
+		"blocked_gids":  gids,
+	}
+	ev := TimelineEvent{
+		TimeMs: st.lastTimeMs,
+		TimeNs: st.lastTimeNs,
+		Event:  "warn_quiescence",
+		Source: "audit",
+		Value:  payload,
+	}
+	return &ev
+}
+
+func deadlockWindowMs() float64 {
+	raw := strings.TrimSpace(os.Getenv("GTV_DEADLOCK_WINDOW_MS"))
+	if raw == "" {
+		return 1000
+	}
+	if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
+		return v
+	}
+	return 1000
+}
+
+func (st *ParseState) deadlockCycleEvent() *TimelineEvent {
+	if st == nil {
+		return nil
+	}
+	if len(st.blocked) == 0 {
+		return nil
+	}
+	window := deadlockWindowMs()
+	graph := make(map[int64][]int64)
+	edgeInfo := make(map[string]string) // "g1->g2" -> channelID
+	resolveCandidate := func(kind, channelID string) (lastOpInfo, bool, string) {
+		if channelID == "" {
+			return lastOpInfo{}, false, ""
+		}
+		var (
+			info lastOpInfo
+			ok   bool
+			id   = channelID
+		)
+		lookup := func(key string) (lastOpInfo, bool) {
+			if key == "" {
+				return lastOpInfo{}, false
+			}
+			if kind == "recv" {
+				v, ok := st.lastSendByChannel[key]
+				return v, ok
+			}
+			v, ok := st.lastRecvByChannel[key]
+			return v, ok
+		}
+		info, ok = lookup(channelID)
+		if ok {
+			return info, true, id
+		}
+		if _, ch, okParse := parseRegionOp(channelID); okParse && ch != "" {
+			if info, ok = lookup(ch); ok {
+				return info, true, ch
+			}
+		}
+		if strings.HasPrefix(channelID, "0x") {
+			if name, okName := st.channelNameByPtr[channelID]; okName && name != "" {
+				info, ok = lookup(name)
+				if ok {
+					return info, true, name
+				}
+				if _, ch, okParse := parseRegionOp(name); okParse && ch != "" {
+					if info, ok = lookup(ch); ok {
+						return info, true, ch
+					}
+				}
+			}
+		}
+		return lastOpInfo{}, false, ""
+	}
+	for gid, info := range st.blocked {
+		channelID := info.ChannelID
+		if channelID == "" {
+			continue
+		}
+		kind := info.Reason
+		candidate, ok, edgeLabel := resolveCandidate(kind, channelID)
+		if !ok || candidate.G == 0 {
+			continue
+		}
+		if st.lastTimeMs-candidate.TimeMs > window {
+			continue
+		}
+		graph[gid] = append(graph[gid], candidate.G)
+		if edgeLabel == "" {
+			edgeLabel = channelID
+		}
+		edgeInfo[fmt.Sprintf("g%d->g%d", gid, candidate.G)] = edgeLabel
+	}
+	if os.Getenv("GTV_DEBUG_DEADLOCK") == "1" {
+		fmt.Fprintf(os.Stderr, "deadlock: graph=%v\n", graph)
+	}
+	if len(graph) == 0 {
+		return nil
+	}
+
+	visited := make(map[int64]bool)
+	onStack := make(map[int64]bool)
+	var stack []int64
+	var cycle []int64
+
+	var dfs func(int64) bool
+	dfs = func(n int64) bool {
+		visited[n] = true
+		onStack[n] = true
+		stack = append(stack, n)
+		for _, next := range graph[n] {
+			if !visited[next] {
+				if dfs(next) {
+					return true
+				}
+			} else if onStack[next] {
+				// build cycle from next to current
+				idx := 0
+				for i := len(stack) - 1; i >= 0; i-- {
+					if stack[i] == next {
+						idx = i
+						break
+					}
+				}
+				cycle = append([]int64{}, stack[idx:]...)
+				cycle = append(cycle, next)
+				return true
+			}
+		}
+		stack = stack[:len(stack)-1]
+		onStack[n] = false
+		return false
+	}
+
+	for n := range graph {
+		if !visited[n] {
+			if dfs(n) {
+				break
+			}
+		}
+	}
+	if len(cycle) == 0 {
+		return nil
+	}
+	path := make([]string, 0, len(cycle)-1)
+	for i := 0; i < len(cycle)-1; i++ {
+		from := cycle[i]
+		to := cycle[i+1]
+		key := fmt.Sprintf("g%d->g%d", from, to)
+		ch := edgeInfo[key]
+		if ch == "" {
+			path = append(path, fmt.Sprintf("g%d -> g%d", from, to))
+		} else {
+			path = append(path, fmt.Sprintf("g%d -%s-> g%d", from, ch, to))
+		}
+	}
+	payload := map[string]any{
+		"cycle_gids": cycle,
+		"edges":      path,
+	}
+	st.deadlockCycle = payload
+	ev := TimelineEvent{
+		TimeMs: st.lastTimeMs,
+		TimeNs: st.lastTimeNs,
+		Event:  "warn_deadlock_cycle",
+		Source: "audit",
+		Value:  payload,
+	}
+	return &ev
+}
+
 func (st *ParseState) auditSummaryEvent(source string) TimelineEvent {
 	st.finalizePendingGoroutines()
-	counts := make(map[string]int64, len(st.auditCounts))
+	counts := make(map[string]any, len(st.auditCounts))
 	for k, v := range st.auditCounts {
 		counts[k] = v
+	}
+	if st.deadlockCycle != nil {
+		counts["deadlock_cycle"] = st.deadlockCycle
+	}
+	var pendingSends int64
+	var pendingSendChans int64
+	unmatchedTotals := UnmatchedTotals{}
+	channelAudit := make(map[string]*ChannelUnmatchedAudit)
+	for key, q := range st.sendsByKey {
+		if len(q) == 0 {
+			continue
+		}
+		pendingSendChans++
+		pendingSends += int64(len(q))
+		ch := string(key)
+		if ch == "" {
+			unmatchedTotals.Sends += int64(len(q))
+			continue
+		}
+		entry := channelAudit[ch]
+		if entry == nil {
+			entry = &ChannelUnmatchedAudit{ChanID: ch}
+			channelAudit[ch] = entry
+		}
+		entry.UnmatchedSends += int64(len(q))
+		unmatchedTotals.Sends += int64(len(q))
+	}
+	if pendingSends > 0 {
+		counts["unmatched_send_pending"] = pendingSends
+		counts["unmatched_send_channels"] = pendingSendChans
+	}
+	for ch, n := range st.unmatchedRecvByChannel {
+		if ch == "" {
+			unmatchedTotals.Recvs += n
+			continue
+		}
+		entry := channelAudit[ch]
+		if entry == nil {
+			entry = &ChannelUnmatchedAudit{ChanID: ch}
+			channelAudit[ch] = entry
+		}
+		entry.UnmatchedRecvs += n
+		unmatchedTotals.Recvs += n
+	}
+	for key, q := range st.pendingRecvByKey {
+		if len(q) == 0 {
+			continue
+		}
+		ch := string(key)
+		if ch == "" {
+			unmatchedTotals.Recvs += int64(len(q))
+			continue
+		}
+		entry := channelAudit[ch]
+		if entry == nil {
+			entry = &ChannelUnmatchedAudit{ChanID: ch}
+			channelAudit[ch] = entry
+		}
+		entry.UnmatchedRecvs += int64(len(q))
+		unmatchedTotals.Recvs += int64(len(q))
+	}
+	for ch, n := range st.matchedPairsByChannel {
+		if ch == "" {
+			continue
+		}
+		entry := channelAudit[ch]
+		if entry == nil {
+			entry = &ChannelUnmatchedAudit{ChanID: ch}
+			channelAudit[ch] = entry
+		}
+		entry.MatchedPairs += n
+	}
+	if len(channelAudit) > 0 {
+		keys := make([]string, 0, len(channelAudit))
+		for ch := range channelAudit {
+			keys = append(keys, ch)
+		}
+		sort.Strings(keys)
+		ordered := make([]ChannelUnmatchedAudit, 0, len(keys))
+		for _, ch := range keys {
+			ordered = append(ordered, *channelAudit[ch])
+		}
+		counts["unmatched_by_channel"] = ordered
+	}
+	unmatchedTotals.UnknownChannelID = st.unknownChannelID
+	if unmatchedTotals.Sends > 0 || unmatchedTotals.Recvs > 0 || unmatchedTotals.UnknownChannelID > 0 {
+		counts["unmatched_totals"] = unmatchedTotals
+	}
+	var filteredTotal int64
+	if v, ok := counts[auditGoroutineLifecycleFilteredByName].(int64); ok {
+		filteredTotal += v
+	}
+	if v, ok := counts[auditGoroutineLifecycleFilteredByMissingOps].(int64); ok {
+		filteredTotal += v
+	}
+	if filteredTotal > 0 {
+		counts["goroutine_filtered_total"] = filteredTotal
+	}
+	if len(st.unparsedRegionSamples) > 0 {
+		counts["unparsed_region_samples"] = st.unparsedRegionSamples
+	}
+	if len(st.blockedTotalMs) > 0 || len(st.blockedAt) > 0 || len(st.blockedTotalByReason) > 0 {
+		type pair struct {
+			gid   int64
+			total float64
+		}
+		var items []pair
+		reasonTotals := make(map[string]float64, len(st.blockedTotalByReason))
+		for reason, total := range st.blockedTotalByReason {
+			reasonTotals[reason] = total
+		}
+		for gid, total := range st.blockedTotalMs {
+			items = append(items, pair{gid: gid, total: total})
+		}
+		for gid, start := range st.blockedAt {
+			delta := st.lastTimeMs - start
+			if delta < 0 {
+				delta = 0
+			}
+			items = append(items, pair{gid: gid, total: delta + st.blockedTotalMs[gid]})
+			reason := st.blockedReasonByG[gid]
+			if reason == "" {
+				reason = "unknown"
+			}
+			reasonTotals[reason] += delta
+		}
+		sort.Slice(items, func(i, j int) bool { return items[i].total > items[j].total })
+		top := make(map[string]float64)
+		maxBlocked := float64(0)
+		for i, item := range items {
+			if i >= 5 {
+				break
+			}
+			if item.total > maxBlocked {
+				maxBlocked = item.total
+			}
+			top[fmt.Sprintf("g%d", item.gid)] = item.total
+		}
+		if maxBlocked > 0 {
+			counts["max_blocked_ms"] = maxBlocked
+		}
+		if len(top) > 0 {
+			counts["blocked_total_ms_by_gid"] = top
+		}
+		if len(reasonTotals) > 0 {
+			counts["blocked_total_ms_by_reason"] = reasonTotals
+		}
 	}
 	return TimelineEvent{
 		TimeMs: st.lastTimeMs,
@@ -262,6 +981,16 @@ func (st *ParseState) auditSummaryEvent(source string) TimelineEvent {
 }
 
 func EmitAuditSummary(st *ParseState, emit func(TimelineEvent) error, source string) error {
+	if warn := st.quiescenceWarningEvent(); warn != nil {
+		if err := emit(*warn); err != nil {
+			return err
+		}
+	}
+	if warn := st.deadlockCycleEvent(); warn != nil {
+		if err := emit(*warn); err != nil {
+			return err
+		}
+	}
 	return emit(st.auditSummaryEvent(source))
 }
 
@@ -439,13 +1168,29 @@ func (st *ParseState) consumeFreshChPtr(gid int64) string {
 		delete(st.lastChPtrSeqByG, gid)
 		return ptr
 	}
-	if st.eventIndexByG[gid]-seq <= 1 {
+	// Allow a small window for adjacent ch_ptr/ch_name logs before a region begins.
+	if st.eventIndexByG[gid]-seq <= 6 {
 		delete(st.lastChPtrByG, gid)
 		delete(st.lastChPtrSeqByG, gid)
 		return ptr
 	}
 	delete(st.lastChPtrByG, gid)
 	delete(st.lastChPtrSeqByG, gid)
+	return ""
+}
+
+func (st *ParseState) peekFreshChPtr(gid int64) string {
+	ptr, ok := st.lastChPtrByG[gid]
+	if !ok {
+		return ""
+	}
+	seq := st.lastChPtrSeqByG[gid]
+	if seq == 0 {
+		return ptr
+	}
+	if st.eventIndexByG[gid]-seq <= 6 {
+		return ptr
+	}
 	return ""
 }
 
@@ -460,13 +1205,29 @@ func (st *ParseState) consumeFreshChName(gid int64) string {
 		delete(st.lastChNameSeqByG, gid)
 		return name
 	}
-	if st.eventIndexByG[gid]-seq <= 1 {
+	// Allow a small window for adjacent ch_ptr/ch_name logs before a region begins.
+	if st.eventIndexByG[gid]-seq <= 6 {
 		delete(st.lastChNameByG, gid)
 		delete(st.lastChNameSeqByG, gid)
 		return name
 	}
 	delete(st.lastChNameByG, gid)
 	delete(st.lastChNameSeqByG, gid)
+	return ""
+}
+
+func (st *ParseState) peekFreshChName(gid int64) string {
+	name, ok := st.lastChNameByG[gid]
+	if !ok {
+		return ""
+	}
+	seq := st.lastChNameSeqByG[gid]
+	if seq == 0 {
+		return name
+	}
+	if st.eventIndexByG[gid]-seq <= 6 {
+		return name
+	}
 	return ""
 }
 
@@ -484,6 +1245,84 @@ func (st *ParseState) bumpEventIndex(gid int64) int64 {
 // Also works with variations like "send 1 to ping".
 func parseRegionOp(typ string) (kind, ch string, ok bool) {
 	lt := strings.ToLower(typ)
+	// Instrumenter wraps close(ch) with a small region for readability.
+	// Traceproc already emits a dedicated "chan_close" event from logs, so treat
+	// this region as recognized-but-non-operational to avoid audit noise.
+	if lt == "chan.close" || lt == "chan_close" || strings.HasPrefix(lt, "chan.close ") {
+		return "chan_close", "", true
+	}
+	if strings.HasPrefix(lt, "mutex.") {
+		parts := strings.Fields(lt)
+		if len(parts) > 0 {
+			action := strings.TrimPrefix(parts[0], "mutex.")
+			if action == "lock" || action == "unlock" {
+				label := ""
+				if len(parts) > 1 {
+					label = parts[1]
+				}
+				if label == "" {
+					ch = "mutex"
+				} else {
+					ch = "mutex:" + label
+				}
+				return "mutex_" + action, ch, true
+			}
+		}
+	}
+	if strings.HasPrefix(lt, "rwmutex.") {
+		parts := strings.Fields(lt)
+		if len(parts) > 0 {
+			action := strings.TrimPrefix(parts[0], "rwmutex.")
+			if action == "lock" || action == "unlock" || action == "rlock" || action == "runlock" {
+				label := ""
+				if len(parts) > 1 {
+					label = parts[1]
+				}
+				if label == "" {
+					ch = "rwmutex"
+				} else {
+					ch = "rwmutex:" + label
+				}
+				return "rwmutex_" + action, ch, true
+			}
+		}
+	}
+	if strings.HasPrefix(lt, "wg.") {
+		parts := strings.Fields(lt)
+		if len(parts) > 0 {
+			action := strings.TrimPrefix(parts[0], "wg.")
+			if action == "add" || action == "done" || action == "wait" {
+				label := ""
+				if len(parts) > 1 {
+					label = parts[1]
+				}
+				if label == "" {
+					ch = "wg"
+				} else {
+					ch = "wg:" + label
+				}
+				return "wg_" + action, ch, true
+			}
+		}
+	}
+	if strings.HasPrefix(lt, "cond.") {
+		parts := strings.Fields(lt)
+		if len(parts) > 0 {
+			action := strings.TrimPrefix(parts[0], "cond.")
+			if action == "wait" || action == "signal" || action == "broadcast" {
+				label := ""
+				if len(parts) > 1 {
+					label = parts[1]
+				}
+				if label == "" {
+					ch = "cond"
+				} else {
+					ch = "cond:" + label
+				}
+				return "cond_" + action, ch, true
+			}
+		}
+	}
 	// Prefer the more specific phrasing first.
 	if strings.Contains(lt, "receive") {
 		if i := strings.LastIndex(lt, " from "); i >= 0 {
@@ -546,25 +1385,83 @@ func parseRegionOp(typ string) (kind, ch string, ok bool) {
 	return "", "", false
 }
 
+func (st *ParseState) setSyncWaitCandidate(gid int64, kind, ch string, tsMs float64) {
+	if !isSyncWaitKind(kind) {
+		return
+	}
+	ck := parseChKey(ch)
+	channelKey := ""
+	if ch != "" {
+		channelKey = st.channelKey(ck, "")
+	}
+	st.syncWaitCandidateByG[gid] = syncWaitCandidate{
+		Kind:       kind,
+		Channel:    ch,
+		ChannelKey: channelKey,
+		StartMs:    tsMs,
+	}
+}
+
+func (st *ParseState) clearSyncWaitCandidate(gid int64, kind string) {
+	cur, ok := st.syncWaitCandidateByG[gid]
+	if !ok {
+		return
+	}
+	if kind != "" && cur.Kind != kind {
+		return
+	}
+	delete(st.syncWaitCandidateByG, gid)
+}
+
+func (st *ParseState) inferSyncWaitContext(gid int64, runtimeReason string) (kind, ch, chKey, confidence string) {
+	if cand, ok := st.syncWaitCandidateByG[gid]; ok {
+		return cand.Kind, cand.Channel, cand.ChannelKey, "high"
+	}
+	kind = syncWaitKindFromRuntimeReason(runtimeReason)
+	if kind == "" {
+		return "", "", "", ""
+	}
+	return kind, "", "", "medium"
+}
+
+func isSyncRegionKind(kind string) bool {
+	return strings.HasPrefix(kind, "mutex_") ||
+		strings.HasPrefix(kind, "rwmutex_") ||
+		strings.HasPrefix(kind, "wg_")
+}
+
 func parseChNameMessage(msg string) (ptr, name string) {
-	for _, part := range strings.Fields(msg) {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return "", ""
+	}
+	if i := strings.Index(msg, "ptr="); i >= 0 {
+		rest := strings.TrimSpace(msg[i+4:])
+		if fields := strings.Fields(rest); len(fields) > 0 {
+			ptr = fields[0]
 		}
-		if strings.HasPrefix(part, "ptr=") {
-			ptr = strings.TrimPrefix(part, "ptr=")
-			continue
-		}
-		if strings.HasPrefix(part, "name=") {
-			name = strings.TrimPrefix(part, "name=")
-			continue
+	}
+	if i := strings.Index(msg, "name="); i >= 0 {
+		name = strings.TrimSpace(msg[i+5:])
+		name = strings.Trim(name, "\"'")
+	}
+	if name != "" {
+		if _, ch, ok := parseRegionOp(name); ok && ch != "" {
+			name = ch
 		}
 	}
 	return ptr, name
 }
 
 func (st *ParseState) handleRegionEnd(kind string, op op, gid int64, role string, tsMs float64, emit func(TimelineEvent) error) {
+	if strings.HasPrefix(kind, "cond_") {
+		st.clearSyncWaitCandidate(gid, kind)
+		return
+	}
+	if isSyncRegionKind(kind) {
+		st.clearSyncWaitCandidate(gid, kind)
+		return
+	}
 	// Attach any stashed value to the completion event
 	val, hasVal := st.lastValue[gid]
 	if hasVal {
@@ -618,7 +1515,9 @@ func (st *ParseState) handleRegionEnd(kind string, op op, gid int64, role string
 				}
 			}
 			chPtr := att.ptr
-			_ = emit(TimelineEvent{TimeMs: tsMs, Event: cev, ID: cid, AttemptID: att.id, G: gid, Channel: att.ch, ChannelKey: st.channelKey(ck, chPtr), ChPtr: chPtr, MissingPtr: chPtr == "", PeerG: peerG, PairID: pairID, DeltaMs: tsMs - att.time, Role: role, Source: "region"})
+			channelID := st.channelKey(ck, chPtr)
+			_ = emit(TimelineEvent{TimeMs: tsMs, Event: cev, ID: cid, AttemptID: att.id, G: gid, Channel: att.ch, ChannelKey: channelID, ChPtr: chPtr, MissingPtr: chPtr == "", PeerG: peerG, PairID: pairID, DeltaMs: tsMs - att.time, Role: role, Source: "region"})
+			st.recordChannelActivity("recv", gid, channelID, tsMs)
 			// Buffered depth accounting: if the paired send attempt had been buffered, depth--
 			if chPtr != "" && st.capByPtr[chPtr] > 0 {
 				if st.bufSends[chPtr] != nil && st.bufSends[chPtr][pairID] {
@@ -634,7 +1533,9 @@ func (st *ParseState) handleRegionEnd(kind string, op op, gid int64, role string
 			cev = "chan_send_commit"
 			// For send, use the send attempt id as the pair id; receiver will reuse it.
 			chPtr := att.ptr
-			_ = emit(TimelineEvent{TimeMs: tsMs, Event: cev, ID: cid, AttemptID: att.id, G: gid, Channel: att.ch, ChannelKey: st.channelKey(ck, chPtr), ChPtr: chPtr, MissingPtr: chPtr == "", PairID: att.id, DeltaMs: tsMs - att.time, Role: role, Source: "region"})
+			channelID := st.channelKey(ck, chPtr)
+			_ = emit(TimelineEvent{TimeMs: tsMs, Event: cev, ID: cid, AttemptID: att.id, G: gid, Channel: att.ch, ChannelKey: channelID, ChPtr: chPtr, MissingPtr: chPtr == "", PairID: att.id, DeltaMs: tsMs - att.time, Role: role, Source: "region"})
+			st.recordChannelActivity("send", gid, channelID, tsMs)
 			// Buffered depth accounting: if channel is buffered, increment and mark this attempt as buffered
 			if chPtr != "" && st.capByPtr[chPtr] > 0 {
 				if st.bufSends[chPtr] == nil {
@@ -661,6 +1562,9 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 	gid := int64(e.Goroutine())
 	st.lastTimeMs = tsMs
 	st.lastTimeNs = tsNs
+	if st.lastProgressMs == 0 {
+		st.lastProgressMs = tsMs
+	}
 	st.bumpEventIndex(gid)
 	// Ensure every emitted event carries a stable nanosecond timestamp for dedup.
 	baseEmit := emit
@@ -681,7 +1585,8 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 	switch e.Kind() {
 	case xtrace.EventLog:
 		l := e.Log()
-		// Channel pointer identity logs from instrumenter: category "ch_ptr", message like "ptr=0xc000014120".
+		// Treat ch_ptr as metadata only (for channel attribution), not as a timeline event.
+		// This avoids event explosion in hot loops/select evaluation.
 		// Some instrumentation runs may not preserve the category; accept messages that contain "ptr=" as a fallback.
 		if l.Category == "ch_ptr" {
 			msg := strings.TrimSpace(l.Message)
@@ -697,7 +1602,6 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 			if ptr != "" {
 				st.lastChPtrByG[gid] = ptr
 				st.lastChPtrSeqByG[gid] = st.eventIndexByG[gid]
-				_ = emit(TimelineEvent{TimeMs: tsMs, Event: "ch_ptr", G: gid, Role: st.Roles[gid], ChannelKey: ptr, ChPtr: ptr, Source: "log"})
 			}
 			return nil
 		}
@@ -729,7 +1633,6 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				if ptr != "" {
 					st.lastChPtrByG[gid] = ptr
 					st.lastChPtrSeqByG[gid] = st.eventIndexByG[gid]
-					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "ch_ptr", G: gid, Role: st.Roles[gid], ChannelKey: ptr, ChPtr: ptr, Source: "log"})
 					return nil
 				}
 			}
@@ -839,6 +1742,37 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 				st.markGoroutineInterested(gid)
 			}
 		}
+		if l.Category == "select_recv" || l.Category == "select_send" {
+			ptr, name := parseChNameMessage(strings.TrimSpace(l.Message))
+			if name != "" && ptr != "" {
+				st.channelNameByPtr[ptr] = name
+			}
+			if ptr != "" {
+				st.lastChPtrByG[gid] = ptr
+				st.lastChPtrSeqByG[gid] = st.eventIndexByG[gid]
+			}
+			if name != "" {
+				st.lastChNameByG[gid] = name
+				st.lastChNameSeqByG[gid] = st.eventIndexByG[gid]
+			}
+			ck := parseChKey(name)
+			if name == "" && ptr != "" {
+				ck = parseChKey(ptr)
+			}
+			chKey := st.channelKey(ck, ptr)
+			evName := "recv_complete"
+			chanName := "chan_recv"
+			if l.Category == "select_send" {
+				evName = "send_complete"
+				chanName = "chan_send"
+			}
+			_ = emit(TimelineEvent{TimeMs: tsMs, Event: evName, Channel: name, ChannelKey: chKey, ChPtr: ptr, G: gid, Role: st.Roles[gid], Source: "select"})
+			_ = emit(TimelineEvent{TimeMs: tsMs, Event: chanName, Channel: name, ChannelKey: chKey, ChPtr: ptr, G: gid, Role: st.Roles[gid], Source: "select"})
+			if sid := st.activeSelect[gid]; sid != "" && (ptr != "" || name != "") {
+				st.selectEmitted[sid] = true
+			}
+			return nil
+		}
 		if l.Category == "main" || l.Category == "worker" || l.Category == "server" || l.Category == "client" {
 			st.setRole(gid, l.Category)
 			st.markGoroutineInterested(gid)
@@ -912,17 +1846,27 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 		if kind, ch, ok := parseRegionOp(rgn.Type); ok {
 			_ = st.handleRegionBegin(kind, ch, gid, st.Roles[gid], tsMs, emit)
 		} else {
-			st.incAudit(auditUnparsedRegionOp)
+			if !strings.HasPrefix(strings.ToLower(rgn.Type), "goroutine:") {
+				st.incAudit(auditUnparsedRegionOp)
+				st.noteUnparsedRegion(rgn.Type)
+			}
 		}
 
 	case xtrace.EventRegionEnd:
 		rgn := e.Region()
 		gid := int64(e.Goroutine())
+		regionKind, _, regionKnown := parseRegionOp(rgn.Type)
+		if regionKnown && (isSyncWaitKind(regionKind) || strings.HasPrefix(regionKind, "cond_")) {
+			st.clearSyncWaitCandidate(gid, regionKind)
+		}
 		if op, ok := st.Active[gid]; ok {
-			if kind, _, ok2 := parseRegionOp(rgn.Type); ok2 && kind == op.kind {
-				st.handleRegionEnd(kind, op, gid, st.Roles[gid], tsMs, emit)
+			if regionKnown && regionKind == op.kind {
+				st.handleRegionEnd(regionKind, op, gid, st.Roles[gid], tsMs, emit)
 			} else {
-				st.incAudit(auditUnparsedRegionOp)
+				if !strings.HasPrefix(strings.ToLower(rgn.Type), "goroutine:") {
+					st.incAudit(auditUnparsedRegionOp)
+					st.noteUnparsedRegion(rgn.Type)
+				}
 				if st.Opt.EmitAtomic {
 					if att, ok := st.attemptsByG[gid]; ok {
 						fallback := op
@@ -946,12 +1890,16 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 		gid := int64(s.Resource.Goroutine())
 		oldState, newState := s.Goroutine()
 
-		// get top frame func name if available
+		// get top frame func name + file/line if available
 		fn := ""
+		file := ""
+		line := 0
 		stck := s.Stack
 		if stck != xtrace.NoStack {
 			for frame := range stck.Frames() {
 				fn = frame.Func
+				file = frame.File
+				line = int(frame.Line)
 				break
 			}
 		}
@@ -964,12 +1912,12 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 			if st.Opt.GoroutineFilter == GoroutineFilterAll {
 				st.markGoroutineInterested(gid)
 				st.ensureRole(gid, st.roleForName(fn, "unknown"))
-				return emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_created", G: gid, Func: fn, Role: st.Roles[gid], Source: "state"})
+				return emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_created", G: gid, Func: fn, File: file, Line: line, Role: st.Roles[gid], Source: "state"})
 			}
 			if st.shouldTrackGoroutine(fn) {
 				st.markGoroutineInterested(gid)
 				st.ensureRole(gid, st.roleForName(fn, "worker"))
-				return emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_created", G: gid, Func: fn, Role: st.Roles[gid], Source: "state"})
+				return emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_created", G: gid, Func: fn, File: file, Line: line, Role: st.Roles[gid], Source: "state"})
 			}
 			pending := st.pendingGoroutines[gid]
 			pending.name = fn
@@ -988,7 +1936,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 			if st.Opt.GoroutineFilter == GoroutineFilterAll {
 				st.markGoroutineInterested(gid)
 				st.ensureRole(gid, st.roleForName(name, "unknown"))
-				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_started", G: gid, Func: name, Role: st.Roles[gid], Source: "state"}); err != nil {
+				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_started", G: gid, Func: name, File: file, Line: line, Role: st.Roles[gid], Source: "state"}); err != nil {
 					return err
 				}
 				if st.Opt.EmitAtomic {
@@ -997,14 +1945,14 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 					if name != "main.main" {
 						parent = st.lastMainG
 					}
-					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "go_start", ID: st.newID("g"), G: gid, Func: name, ParentG: parent, Role: st.Roles[gid], Source: "state"})
+					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "go_start", ID: st.newID("g"), G: gid, Func: name, File: file, Line: line, ParentG: parent, Role: st.Roles[gid], Source: "state"})
 				}
 				return nil
 			}
 			if st.shouldTrackGoroutine(name) {
 				st.markGoroutineInterested(gid)
 				st.ensureRole(gid, st.roleForName(name, "worker"))
-				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_started", G: gid, Func: name, Role: st.Roles[gid], Source: "state"}); err != nil {
+				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "goroutine_started", G: gid, Func: name, File: file, Line: line, Role: st.Roles[gid], Source: "state"}); err != nil {
 					return err
 				}
 				if st.Opt.EmitAtomic {
@@ -1013,7 +1961,7 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 					if name != "main.main" {
 						parent = st.lastMainG
 					}
-					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "go_start", ID: st.newID("g"), G: gid, Func: name, ParentG: parent, Role: st.Roles[gid], Source: "state"})
+					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "go_start", ID: st.newID("g"), G: gid, Func: name, File: file, Line: line, ParentG: parent, Role: st.Roles[gid], Source: "state"})
 				}
 				return nil
 			}
@@ -1035,63 +1983,250 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 			}
 			switch s.Reason {
 			case "chan send":
-				ch := ""
-				if op, ok := st.Active[gid]; ok && op.kind == "send" {
-					ch = op.ch
-				} else if op, ok := st.Last[gid]; ok && op.kind == "send" {
-					ch = op.ch
-				}
+				ch, chPtr, chKey, confidence := st.inferBlockChannel(gid, "send", tsMs)
+				blockCause, blockCap, blockLen := st.blockCauseFor("send", chPtr)
 				if ch == "" && st.Opt.DropBlockNoCh {
 					st.incAudit(auditBlockedDropNoChannelSend)
 					return nil
 				}
-				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_send", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
+				channelID := ""
+				if chPtr != "" {
+					channelID = chKey
+				} else if chKey != "" {
+					channelID = chKey
+				}
+				if channelID == "" {
+					st.incAudit(auditMissingBlockChannel)
+				}
+				if err := emit(TimelineEvent{
+					TimeMs:     tsMs,
+					Event:      "go_block",
+					G:          gid,
+					Role:       st.Roles[gid],
+					Channel:    ch,
+					ChannelKey: chKey,
+					ChPtr:      chPtr,
+					BlockKind:  "chan_send",
+					BlockCause: blockCause,
+					BlockCap:   blockCap,
+					BlockLen:   blockLen,
+					ChannelID:  channelID,
+					Confidence: confidence,
+					Source:     "state",
+				}); err != nil {
+					return err
+				}
+				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_send", G: gid, Role: st.Roles[gid], Channel: ch, ChannelKey: chKey, ChPtr: chPtr, BlockCause: blockCause, BlockCap: blockCap, BlockLen: blockLen, Source: "state"}); err != nil {
 					return err
 				}
 				if st.Opt.EmitAtomic {
-					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "block", G: gid, Role: st.Roles[gid], Channel: ch, Reason: "send", Source: "state"})
+					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "block", G: gid, Role: st.Roles[gid], Channel: ch, ChannelKey: chKey, ChPtr: chPtr, Reason: "send", BlockCause: blockCause, BlockCap: blockCap, BlockLen: blockLen, Source: "state"})
 				}
-				st.blocked[gid] = struct{ Reason, Ch string }{Reason: "send", Ch: ch}
+				st.blocked[gid] = struct{ Reason, Ch, ChannelID, Confidence string }{
+					Reason:     "send",
+					Ch:         ch,
+					ChannelID:  channelID,
+					Confidence: confidence,
+				}
+				if _, ok := st.blockedAt[gid]; !ok {
+					st.blockedAt[gid] = tsMs
+					st.blockedReasonByG[gid] = "chan_send"
+				}
 				return nil
 			case "chan receive":
-				ch := ""
-				if op, ok := st.Active[gid]; ok && op.kind == "recv" {
-					ch = op.ch
-				} else if op, ok := st.Last[gid]; ok && op.kind == "recv" {
-					ch = op.ch
-				}
+				ch, chPtr, chKey, confidence := st.inferBlockChannel(gid, "recv", tsMs)
+				blockCause, blockCap, blockLen := st.blockCauseFor("recv", chPtr)
 				if ch == "" && st.Opt.DropBlockNoCh {
 					st.incAudit(auditBlockedDropNoChannelRecv)
 					return nil
 				}
-				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_receive", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
+				channelID := ""
+				if chPtr != "" {
+					channelID = chKey
+				} else if chKey != "" {
+					channelID = chKey
+				}
+				if channelID == "" {
+					st.incAudit(auditMissingBlockChannel)
+				}
+				if err := emit(TimelineEvent{
+					TimeMs:     tsMs,
+					Event:      "go_block",
+					G:          gid,
+					Role:       st.Roles[gid],
+					Channel:    ch,
+					ChannelKey: chKey,
+					ChPtr:      chPtr,
+					BlockKind:  "chan_recv",
+					BlockCause: blockCause,
+					BlockCap:   blockCap,
+					BlockLen:   blockLen,
+					ChannelID:  channelID,
+					Confidence: confidence,
+					Source:     "state",
+				}); err != nil {
+					return err
+				}
+				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "blocked_receive", G: gid, Role: st.Roles[gid], Channel: ch, ChannelKey: chKey, ChPtr: chPtr, BlockCause: blockCause, BlockCap: blockCap, BlockLen: blockLen, Source: "state"}); err != nil {
 					return err
 				}
 				if st.Opt.EmitAtomic {
-					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "block", G: gid, Role: st.Roles[gid], Channel: ch, Reason: "recv", Source: "state"})
+					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "block", G: gid, Role: st.Roles[gid], Channel: ch, ChannelKey: chKey, ChPtr: chPtr, Reason: "recv", BlockCause: blockCause, BlockCap: blockCap, BlockLen: blockLen, Source: "state"})
 				}
-				st.blocked[gid] = struct{ Reason, Ch string }{Reason: "recv", Ch: ch}
+				st.blocked[gid] = struct{ Reason, Ch, ChannelID, Confidence string }{
+					Reason:     "recv",
+					Ch:         ch,
+					ChannelID:  channelID,
+					Confidence: confidence,
+				}
+				if _, ok := st.blockedAt[gid]; !ok {
+					st.blockedAt[gid] = tsMs
+					st.blockedReasonByG[gid] = "chan_recv"
+				}
+				return nil
+			default:
+				blockKind, ch, chKey, confidence := st.inferSyncWaitContext(gid, s.Reason)
+				if blockKind == "" {
+					return nil
+				}
+				channelID := chKey
+				if err := emit(TimelineEvent{
+					TimeMs:     tsMs,
+					Event:      "go_block",
+					G:          gid,
+					Role:       st.Roles[gid],
+					Channel:    ch,
+					ChannelKey: chKey,
+					BlockKind:  blockKind,
+					ChannelID:  channelID,
+					Confidence: confidence,
+					Source:     "state",
+				}); err != nil {
+					return err
+				}
+				if st.Opt.EmitAtomic {
+					_ = emit(TimelineEvent{
+						TimeMs:     tsMs,
+						Event:      "block",
+						G:          gid,
+						Role:       st.Roles[gid],
+						Channel:    ch,
+						ChannelKey: chKey,
+						Reason:     blockKind,
+						Source:     "state",
+					})
+				}
+				st.blocked[gid] = struct{ Reason, Ch, ChannelID, Confidence string }{
+					Reason:     blockKind,
+					Ch:         ch,
+					ChannelID:  channelID,
+					Confidence: confidence,
+				}
+				if _, ok := st.blockedAt[gid]; !ok {
+					start := tsMs
+					if cand, ok := st.syncWaitCandidateByG[gid]; ok && cand.Kind == blockKind && cand.StartMs > 0 && cand.StartMs <= tsMs {
+						start = cand.StartMs
+					}
+					st.blockedAt[gid] = start
+					st.blockedReasonByG[gid] = blockKind
+				}
 				return nil
 			}
-			return nil
 		}
 
 		// Unblock
 		if oldState == xtrace.GoWaiting && newState == xtrace.GoRunnable {
 			if _, ok := st.Interested[gid]; ok {
-				ch := ""
-				if op, ok := st.Active[gid]; ok {
-					ch = op.ch
-				} else if op, ok := st.Last[gid]; ok {
-					ch = op.ch
+				info := st.blocked[gid]
+				if info.Reason == "" {
+					if cand, ok := st.syncWaitCandidateByG[gid]; ok {
+						info.Reason = cand.Kind
+						if info.Ch == "" {
+							info.Ch = cand.Channel
+						}
+						if info.ChannelID == "" {
+							info.ChannelID = cand.ChannelKey
+						}
+						if info.Confidence == "" {
+							info.Confidence = "high"
+						}
+					} else if kind, ch, chKey, conf := st.inferSyncWaitContext(gid, s.Reason); kind != "" {
+						info.Reason = kind
+						info.Ch = ch
+						info.ChannelID = chKey
+						info.Confidence = conf
+					}
 				}
-				if err := emit(TimelineEvent{TimeMs: tsMs, Event: "unblocked", G: gid, Role: st.Roles[gid], Channel: ch, Source: "state"}); err != nil {
+				ch := info.Ch
+				chPtr := ""
+				chKey := info.ChannelID
+				confidence := info.Confidence
+				if info.Reason == "send" || info.Reason == "recv" {
+					kind := info.Reason
+					ch, chPtr, chKey, confidence = st.inferBlockChannel(gid, kind, tsMs)
+				}
+				if info.ChannelID != "" {
+					chKey = info.ChannelID
+					if ch == "" {
+						ch = info.Ch
+					}
+				}
+				channelID := ""
+				if chPtr != "" {
+					channelID = chKey
+				} else if chKey != "" {
+					channelID = chKey
+				}
+				unblockKind := unblockKindFromReason(info.Reason)
+				if channelID == "" && (unblockKind == "chan_send" || unblockKind == "chan_recv") {
+					st.incAudit(auditMissingBlockChannel)
+				}
+				if err := emit(TimelineEvent{
+					TimeMs:      tsMs,
+					Event:       "go_unblock",
+					G:           gid,
+					Role:        st.Roles[gid],
+					Channel:     ch,
+					ChannelKey:  chKey,
+					ChPtr:       chPtr,
+					UnblockKind: unblockKind,
+					ChannelID:   channelID,
+					Confidence:  confidence,
+					Source:      "state",
+				}); err != nil {
 					return err
 				}
 				if st.Opt.EmitAtomic {
-					info := st.blocked[gid]
-					_ = emit(TimelineEvent{TimeMs: tsMs, Event: "unblock", G: gid, Role: st.Roles[gid], Channel: ch, Reason: info.Reason, Source: "state"})
+					if err := emit(TimelineEvent{TimeMs: tsMs, Event: "unblock", G: gid, Role: st.Roles[gid], Channel: ch, ChannelKey: chKey, ChPtr: chPtr, Reason: info.Reason, Source: "state"}); err != nil {
+						return err
+					}
+				} else {
+					if err := emit(TimelineEvent{TimeMs: tsMs, Event: "unblocked", G: gid, Role: st.Roles[gid], Channel: ch, ChannelKey: chKey, ChPtr: chPtr, Source: "state"}); err != nil {
+						return err
+					}
 				}
+				if _, ok := st.blockedAt[gid]; !ok {
+					if cand, ok := st.syncWaitCandidateByG[gid]; ok && cand.StartMs > 0 && cand.StartMs <= tsMs {
+						st.blockedAt[gid] = cand.StartMs
+						if info.Reason != "" {
+							st.blockedReasonByG[gid] = info.Reason
+						} else {
+							st.blockedReasonByG[gid] = cand.Kind
+						}
+					}
+				}
+				if start, ok := st.blockedAt[gid]; ok {
+					reasonKey := st.blockedReasonByG[gid]
+					if reasonKey == "" && info.Reason != "" {
+						reasonKey = info.Reason
+					}
+					st.addBlockedDuration(gid, reasonKey, tsMs-start)
+					delete(st.blockedAt, gid)
+				}
+				delete(st.blockedReasonByG, gid)
+				delete(st.blocked, gid)
+				st.clearSyncWaitCandidate(gid, "")
+				st.markProgress(tsMs)
 				return nil
 			}
 			return nil
@@ -1101,6 +2236,50 @@ func ProcessEvent(e *xtrace.Event, st *ParseState, emit func(TimelineEvent) erro
 }
 
 func (st *ParseState) handleRegionBegin(kind, ch string, gid int64, role string, ts float64, emit func(TimelineEvent) error) error {
+	if strings.HasPrefix(kind, "cond_") {
+		if key := parsedRegionAuditKey(kind); key != "" {
+			st.incAudit(key)
+		}
+		st.setSyncWaitCandidate(gid, kind, ch, ts)
+		if err := st.activateGoroutineFromOp(gid, emit); err != nil {
+			return err
+		}
+		event := TimelineEvent{TimeMs: ts, Event: kind, Channel: ch, ChannelKey: ch, G: gid, Role: role, Source: "cond"}
+		if kind == "cond_wait" {
+			event.UnknownSender = true
+		} else {
+			event.UnknownReceiver = true
+		}
+		return emit(event)
+	}
+	if isSyncRegionKind(kind) {
+		if key := parsedRegionAuditKey(kind); key != "" {
+			st.incAudit(key)
+		}
+		st.setSyncWaitCandidate(gid, kind, ch, ts)
+		if err := st.activateGoroutineFromOp(gid, emit); err != nil {
+			return err
+		}
+		ck := parseChKey(ch)
+		channelKey := ""
+		if ch != "" {
+			channelKey = st.channelKey(ck, "")
+		}
+		ev := TimelineEvent{TimeMs: ts, Event: kind, Channel: ch, G: gid, Role: role, Source: "sync"}
+		if channelKey != "" {
+			ev.ChannelKey = channelKey
+		}
+		return emit(ev)
+	}
+	if kind == "chan_close" {
+		return nil
+	}
+	if kind == "send" {
+		// Avoid interpreting select-clause body regions ("send to X") as channel ops.
+		// The actual select comm is captured via select logs; these regions are for readability.
+		// Keep a tight window so we don't suppress unrelated sends in select bodies.
+		// Note: we still consume ch_ptr/ch_name below to keep attribution state consistent.
+	}
 	chPtr := st.consumeFreshChPtr(gid)
 	chName := st.consumeFreshChName(gid)
 	if chName == "" && chPtr != "" {
@@ -1111,7 +2290,35 @@ func (st *ParseState) handleRegionBegin(kind, ch string, gid int64, role string,
 	if chName != "" {
 		ch = chName
 	}
-	st.Active[gid] = op{kind: kind, ch: ch, ptr: chPtr}
+	if chPtr != "" && ch != "" {
+		st.channelNameByPtr[chPtr] = ch
+	}
+
+	if kind == "send" || kind == "recv" {
+		if last, ok := st.lastSelectChosenByG[gid]; ok {
+			lastSeq := st.lastSelectChosenSeqByG[gid]
+			if lastSeq != 0 && st.eventIndexByG[gid]-lastSeq <= 3 {
+				// Prefer ptr match when available.
+				match := false
+				if chPtr != "" && last.ChPtr != "" && chPtr == last.ChPtr {
+					match = true
+				} else if ch != "" && last.ChName != "" && strings.EqualFold(ch, last.ChName) {
+					match = true
+				}
+				if match && last.Kind == kind {
+					return nil
+				}
+			}
+		}
+	}
+
+	if kind == "send" {
+		st.incAudit(auditParsedRegionSend)
+	}
+	if kind == "recv" {
+		st.incAudit(auditParsedRegionRecv)
+	}
+	st.Active[gid] = op{kind: kind, ch: ch, ptr: chPtr, time: ts}
 	st.Last[gid] = st.Active[gid]
 	if err := st.activateGoroutineFromOp(gid, emit); err != nil {
 		return err
@@ -1172,10 +2379,107 @@ func (st *ParseState) handleRegionBegin(kind, ch string, gid int64, role string,
 	return nil
 }
 
+func blockInferenceWindowMs() float64 {
+	raw := strings.TrimSpace(os.Getenv("GTV_BLOCK_INFER_MS"))
+	if raw == "" {
+		return 20
+	}
+	if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
+		return v
+	}
+	return 20
+}
+
+func (st *ParseState) inferBlockChannel(gid int64, kind string, tsMs float64) (string, string, string, string) {
+	window := blockInferenceWindowMs()
+	tryOp := func(op op) (string, string, string, string, bool) {
+		if kind != "" && op.kind != kind {
+			return "", "", "", "", false
+		}
+		late := op.time > 0 && tsMs-op.time > window
+		ch := op.ch
+		ptr := op.ptr
+		if ch == "" && ptr != "" {
+			if mapped, ok := st.channelNameByPtr[ptr]; ok {
+				ch = mapped
+			}
+		}
+		ck := parseChKey(ch)
+		if ck.Name == "" && ptr != "" {
+			ck = parseChKey(ptr)
+		}
+		chKey := st.channelKey(ck, ptr)
+		conf := "low"
+		if ptr != "" {
+			conf = "high"
+		}
+		if late {
+			conf = "low"
+		}
+		return ch, ptr, chKey, conf, ch != "" || ptr != ""
+	}
+	if op, ok := st.Active[gid]; ok {
+		if ch, ptr, chKey, conf, ok := tryOp(op); ok {
+			return ch, ptr, chKey, conf
+		}
+	}
+	if op, ok := st.Last[gid]; ok {
+		if ch, ptr, chKey, conf, ok := tryOp(op); ok {
+			return ch, ptr, chKey, conf
+		}
+	}
+
+	// Low-confidence fallback: recent ch_ptr/ch_name logs.
+	ptr := st.peekFreshChPtr(gid)
+	ch := st.peekFreshChName(gid)
+	if ch == "" && ptr != "" {
+		if mapped, ok := st.channelNameByPtr[ptr]; ok {
+			ch = mapped
+		}
+	}
+	ck := parseChKey(ch)
+	if ck.Name == "" && ptr != "" {
+		ck = parseChKey(ptr)
+	}
+	chKey := st.channelKey(ck, ptr)
+	if ch == "" && ptr == "" {
+		return "", "", "", "low"
+	}
+	return ch, ptr, chKey, "low"
+}
+
+func (st *ParseState) blockCauseFor(kind, chPtr string) (string, int, int) {
+	if chPtr == "" {
+		return "unknown", 0, 0
+	}
+	capVal := st.capByPtr[chPtr]
+	lenVal := st.depthByPtr[chPtr]
+	if capVal > 0 {
+		if kind == "send" {
+			if lenVal >= capVal {
+				return "buffer_full", capVal, lenVal
+			}
+		}
+		if kind == "recv" {
+			if lenVal <= 0 {
+				return "buffer_empty", capVal, lenVal
+			}
+		}
+	}
+	if kind == "send" {
+		return "no_receiver", capVal, lenVal
+	}
+	if kind == "recv" {
+		return "no_sender", capVal, lenVal
+	}
+	return "unknown", capVal, lenVal
+}
+
 func (st *ParseState) handleChanOp(ev, ch string, gid int64, role string, t float64, val *int, source string, emit func(TimelineEvent) error) error {
 	if err := st.activateGoroutineFromOp(gid, emit); err != nil {
 		return err
 	}
+	st.markProgress(t)
 	// Optional synthesis: ensure a send exists before a recv
 	ck := parseChKey(ch)
 	if strings.HasSuffix(ev, "_recv") && st.Opt.SynthOnRecv {
@@ -1207,9 +2511,16 @@ func (st *ParseState) handleChanOp(ev, ch string, gid int64, role string, t floa
 		}
 	}
 	// Emit requested
-	te := TimelineEvent{TimeMs: t, Event: ev, Channel: ch, ChannelKey: st.channelKey(ck, ""), G: gid, Role: role, Value: val, Source: source}
+	channelID := st.channelKey(ck, "")
+	te := TimelineEvent{TimeMs: t, Event: ev, Channel: ch, ChannelKey: channelID, G: gid, Role: role, Value: val, Source: source}
 	if err := emit(te); err != nil {
 		return err
+	}
+	switch strings.ToLower(ev) {
+	case "chan_send", "send_complete":
+		st.recordChannelActivity("send", gid, channelID, t)
+	case "chan_recv", "recv_complete":
+		st.recordChannelActivity("recv", gid, channelID, t)
 	}
 	if strings.HasSuffix(ev, "_send") && ch != "" {
 		st.hasSend[skey{Ev: ev, Ch: strings.ToLower(ch)}] = true
@@ -1231,6 +2542,14 @@ type sendRecord struct {
 	MsgID  int64
 }
 
+type pendingRecvRecord struct {
+	TimeMs float64
+	G      int64
+	Role   string
+	Ch     string
+	Ptr    string
+}
+
 func parseChKey(ch string) chKey {
 	s := strings.ToLower(ch)
 	if i := strings.Index(s, "["); i >= 0 && strings.HasSuffix(s, "]") {
@@ -1250,6 +2569,112 @@ func shouldSkipPairing(key chKey) bool {
 	return skipPairingChannels[key.Name]
 }
 
+func (st *ParseState) findSendQueueByName(key chKey) (OpKey, []sendRecord, bool) {
+	name := key.Name
+	if key.ClientID >= 0 {
+		name = fmt.Sprintf("%s[%d]", key.Name, key.ClientID)
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "", nil, false
+	}
+	var bestKey OpKey
+	var bestQ []sendRecord
+	bestTime := -1.0
+	for k, q := range st.sendsByKey {
+		if len(q) == 0 {
+			continue
+		}
+		match := false
+		ks := string(k)
+		if strings.ToLower(ks) == name {
+			match = true
+		} else if strings.HasPrefix(ks, "0x") {
+			if nm, ok := st.channelNameByPtr[ks]; ok && strings.ToLower(nm) == name {
+				match = true
+			}
+		}
+		if !match {
+			continue
+		}
+		if bestTime < 0 || q[0].TimeMs < bestTime {
+			bestTime = q[0].TimeMs
+			bestKey = k
+			bestQ = q
+		}
+	}
+	if bestTime < 0 {
+		return "", nil, false
+	}
+	return bestKey, bestQ, true
+}
+
+func (st *ParseState) resolvePendingSelectRecv(key chKey, chPtr string) (OpKey, bool) {
+	opKey := st.opKey(key, chPtr)
+	if st.pendingSelectRecv[opKey] > 0 {
+		return opKey, true
+	}
+	name := key.Name
+	if key.ClientID >= 0 {
+		name = fmt.Sprintf("%s[%d]", key.Name, key.ClientID)
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "", false
+	}
+	for k, n := range st.pendingSelectRecv {
+		if n <= 0 {
+			continue
+		}
+		ks := string(k)
+		if strings.ToLower(ks) == name {
+			return k, true
+		}
+		if strings.HasPrefix(ks, "0x") {
+			if nm, ok := st.channelNameByPtr[ks]; ok && strings.ToLower(nm) == name {
+				return k, true
+			}
+		}
+	}
+	return "", false
+}
+
+func (st *ParseState) popPendingRecv(key chKey, chPtr string) (OpKey, pendingRecvRecord, bool) {
+	opKey := st.opKey(key, chPtr)
+	if q := st.pendingRecvByKey[opKey]; len(q) > 0 {
+		rec := q[0]
+		st.pendingRecvByKey[opKey] = q[1:]
+		return opKey, rec, true
+	}
+	name := key.Name
+	if key.ClientID >= 0 {
+		name = fmt.Sprintf("%s[%d]", key.Name, key.ClientID)
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "", pendingRecvRecord{}, false
+	}
+	for k, q := range st.pendingRecvByKey {
+		if len(q) == 0 {
+			continue
+		}
+		ks := string(k)
+		if strings.ToLower(ks) == name {
+			rec := q[0]
+			st.pendingRecvByKey[k] = q[1:]
+			return k, rec, true
+		}
+		if strings.HasPrefix(ks, "0x") {
+			if nm, ok := st.channelNameByPtr[ks]; ok && strings.ToLower(nm) == name {
+				rec := q[0]
+				st.pendingRecvByKey[k] = q[1:]
+				return k, rec, true
+			}
+		}
+	}
+	return "", pendingRecvRecord{}, false
+}
+
 // handleRegionOp processes the end of a region send/recv and pairs operations by channel key.
 func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role string, t float64, emit func(TimelineEvent) error) error {
 	// Always emit the *_complete event for timelines
@@ -1258,21 +2683,79 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 		ev = "recv_complete"
 	}
 	key := parseChKey(ch)
+	channelID := st.channelKey(key, chPtr)
+	if channelID == "" {
+		channelID = key.Name
+	}
 	if err := emit(TimelineEvent{TimeMs: t, Event: ev, Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "region"}); err != nil {
 		return err
 	}
 	switch kind {
 	case "send":
+		if channelID == "" {
+			st.unknownChannelID++
+		}
 		mid := st.nextMsgID
 		st.nextMsgID++
 		if err := emit(TimelineEvent{TimeMs: t, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: 0, MsgID: mid}); err != nil {
 			return err
 		}
-		st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr, MsgID: mid})
+		if _, rec, ok := st.popPendingRecv(key, chPtr); ok {
+			if channelID == "" {
+				st.unknownChannelID++
+			} else {
+				st.matchedPairsByChannel[channelID]++
+			}
+			_ = emit(TimelineEvent{
+				TimeMs:     rec.TimeMs,
+				Event:      "chan_recv",
+				Channel:    rec.Ch,
+				ChannelKey: st.channelKey(key, rec.Ptr),
+				ChPtr:      rec.Ptr,
+				G:          rec.G,
+				Role:       rec.Role,
+				Source:     "paired",
+				PeerG:      gid,
+				MsgID:      mid,
+			})
+			st.recordChannelActivity("recv", rec.G, channelID, rec.TimeMs)
+		} else if pendKey, ok := st.resolvePendingSelectRecv(key, chPtr); ok {
+			st.pendingSelectRecv[pendKey]--
+			if channelID == "" {
+				st.unknownChannelID++
+			} else {
+				st.matchedPairsByChannel[channelID]++
+			}
+		} else {
+			st.sendsByKey[st.opKey(key, chPtr)] = append(st.sendsByKey[st.opKey(key, chPtr)], sendRecord{TimeMs: t, G: gid, Role: role, Ptr: chPtr, MsgID: mid})
+		}
 	case "recv":
-		q := st.sendsByKey[st.opKey(key, chPtr)]
+		origPtr := chPtr
+		opKey := st.opKey(key, chPtr)
+		q := st.sendsByKey[opKey]
+		if len(q) == 0 && chPtr == "" {
+			if altKey, altQ, ok := st.findSendQueueByName(key); ok {
+				opKey = altKey
+				q = altQ
+				if len(q) > 0 && chPtr == "" {
+					chPtr = q[0].Ptr
+				}
+			}
+		}
+		if chPtr != origPtr {
+			channelID = st.channelKey(key, chPtr)
+			if channelID == "" {
+				channelID = key.Name
+			}
+		}
 		if len(q) == 0 {
-			st.incAudit(auditUnmatchedRecv)
+			st.pendingRecvByKey[opKey] = append(st.pendingRecvByKey[opKey], pendingRecvRecord{
+				TimeMs: t,
+				G:      gid,
+				Role:   role,
+				Ch:     ch,
+				Ptr:    chPtr,
+			})
 			// Prefer not to synthesize for broadcast channels we instrument at both ends.
 			// This avoids duplicate edges on join[i], clientin, clientout[i].
 			lname := key.Name
@@ -1280,53 +2763,19 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 				st.incAudit(auditSkipPairingHardcoded)
 				return nil
 			}
-			if !st.Opt.SynthOnRecv {
-				return nil
-			}
-			// Choose a plausible sender goroutine based on channel and roles
-			var sg int64
-			switch {
-			case lname == "clientin":
-				if st.lastClientG != 0 {
-					sg = st.lastClientG
-				} else {
-					sg = gid
-				}
-			case strings.HasPrefix(lname, "clientout") || strings.HasPrefix(lname, "join"):
-				if st.lastServerG != 0 {
-					sg = st.lastServerG
-				} else {
-					sg = gid
-				}
-			default:
-				if st.lastWorkerG != 0 {
-					sg = st.lastWorkerG
-				} else if st.lastMainG != 0 {
-					sg = st.lastMainG
-				} else {
-					sg = gid
-				}
-			}
-			msgID := st.nextMsgID
-			mid := st.nextMsgID
-			st.nextMsgID++
-			if err := emit(TimelineEvent{TimeMs: t - 0.001, Event: "send_complete", Channel: ch, ChannelKey: st.channelKey(key, chPtr), G: sg, Role: st.Roles[sg], Source: "synth", ChPtr: chPtr}); err != nil {
-				return err
-			}
-			st.incAudit(auditSynthSend)
-			st.incAudit(auditRetroSendEmit)
-			_ = emit(TimelineEvent{TimeMs: t - 0.001, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: sg, Role: st.Roles[sg], Source: "synth", PeerG: gid, MsgID: msgID})
-			_ = emit(TimelineEvent{TimeMs: t - 0.001, Event: "chan_send", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: sg, Role: st.Roles[sg], Source: "paired", PeerG: gid, MsgID: mid})
-			// Also emit an unmatched recv with unknown peer for explicitness
-			_ = emit(TimelineEvent{TimeMs: t, Event: "chan_recv", Channel: ch, ChannelKey: st.channelKey(key, chPtr), ChPtr: chPtr, G: gid, Role: role, Source: "paired", PeerG: sg, MsgID: mid})
 			return nil
 		}
 		// Match with the earliest recorded send
 		sr := q[0]
-		st.sendsByKey[st.opKey(key, chPtr)] = q[1:]
+		st.sendsByKey[opKey] = q[1:]
 		if shouldSkipPairing(key) {
 			st.incAudit(auditSkipPairingEnv)
 			return nil
+		}
+		if channelID == "" {
+			st.unknownChannelID++
+		} else {
+			st.matchedPairsByChannel[channelID]++
 		}
 		// Re-emit the matched send at its original time to ensure ordering (idempotent for UI)
 		st.incAudit(auditRetroSendEmit)
@@ -1340,26 +2789,265 @@ func (st *ParseState) handleRegionOp(kind, ch, chPtr string, gid int64, role str
 	return nil
 }
 
-// handleSelectLog parses simple select_* log messages (if emitted by instrumentation)
-// Supported forms (tokens space-separated, key=val pairs):
+// handleSelectLog parses select_* log messages (if emitted by instrumentation).
+// Supported forms (tokens space-separated; name= may contain spaces and be quoted):
 //
 //	select_begin [id=<sid>]
-//	select_case [id=<sid>] [attempt=<aid>] [kind=send|recv] [ch=<name>]
-//	select_chosen [id=<sid>] [attempt=<aid>]
+//	select_case [id=<sid>] [idx=<i>] [kind=send|recv] [ptr=<p>] [name=<label>]
+//	select_chosen [id=<sid>] [idx=<i>] [attempt=<aid>]
 //	select_end [id=<sid>]
-func (st *ParseState) handleSelectLog(gid int64, msg string, t float64, stack xtrace.Stack, emit func(TimelineEvent) error) {
-	toks := strings.Fields(msg)
-	if len(toks) == 0 {
-		return
+func parseSelectLogFields(msg string) (string, map[string]string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return "", nil
 	}
-	typ := toks[0]
-	kv := make(map[string]string)
-	for _, tk := range toks[1:] {
+	typ := ""
+	rest := msg
+	if i := strings.IndexAny(msg, " \t"); i >= 0 {
+		typ = strings.TrimSpace(msg[:i])
+		rest = strings.TrimSpace(msg[i+1:])
+	} else {
+		typ = msg
+		rest = ""
+	}
+	fields := make(map[string]string)
+	if rest == "" {
+		return typ, fields
+	}
+	name := ""
+	if i := strings.Index(rest, "name="); i >= 0 {
+		name = strings.TrimSpace(rest[i+5:])
+		name = strings.Trim(name, "\"'")
+		rest = strings.TrimSpace(rest[:i])
+	}
+	for _, tk := range strings.Fields(rest) {
 		if i := strings.IndexByte(tk, '='); i > 0 {
 			k := tk[:i]
 			v := tk[i+1:]
-			kv[strings.ToLower(k)] = v
+			fields[strings.ToLower(k)] = v
 		}
+	}
+	if name != "" {
+		fields["name"] = name
+	}
+	return typ, fields
+}
+
+func parseSelectIndex(raw string) int {
+	if raw == "" {
+		return -1
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+func (st *ParseState) selectCaseForChosen(sid string, idx int) (SelectCaseInfo, bool) {
+	cases := st.selectCases[sid]
+	if len(cases) == 0 {
+		return SelectCaseInfo{}, false
+	}
+	if idx >= 0 && idx < len(cases) && cases[idx].Kind != "" {
+		return cases[idx], true
+	}
+	if idx < 0 && len(cases) == 1 && cases[0].Kind != "" {
+		return cases[0], true
+	}
+	return SelectCaseInfo{}, false
+}
+
+func (st *ParseState) emitSelectChosenCase(sid string, info SelectCaseInfo, t float64, gid int64, emit func(TimelineEvent) error) {
+	if info.ChPtr == "" && info.ChKey == "" && info.ChName == "" {
+		st.incAudit(auditMissingChannelIdentity)
+		return
+	}
+	// Record the most recent chosen comm so we can ignore any immediately-following
+	// select-clause body regions that look like the comm itself ("send/recv ...").
+	st.lastSelectChosenByG[gid] = info
+	st.lastSelectChosenSeqByG[gid] = st.eventIndexByG[gid]
+
+	evName := "chan_recv"
+	if info.Kind == "send" {
+		evName = "chan_send"
+	}
+	msgID := int64(0)
+	peerG := int64(0)
+	source := "select"
+	if info.Kind == "send" {
+		// Treat select sends like region sends for pairing: assign a message id and
+		// enqueue so future recvs can match.
+		msgID = st.nextMsgID
+		st.nextMsgID++
+		source = "paired"
+
+		key := parseChKey(info.ChName)
+		ptr := info.ChPtr
+		if ptr == "" && isPointerString(info.ChKey) {
+			ptr = info.ChKey
+		}
+		channelID := info.ChKey
+		if channelID == "" {
+			channelID = st.channelKey(key, ptr)
+		}
+		if channelID == "" {
+			channelID = key.Name
+		}
+		if channelID == "" {
+			st.unknownChannelID++
+		}
+
+		// If a recv was seen first (rare, but can happen with incomplete traces),
+		// complete it now so audit can pair.
+		if _, rec, ok := st.popPendingRecv(key, ptr); ok {
+			if channelID != "" {
+				st.matchedPairsByChannel[channelID]++
+			}
+			_ = emit(TimelineEvent{
+				TimeMs:     rec.TimeMs,
+				Event:      "chan_recv",
+				Channel:    rec.Ch,
+				ChannelKey: st.channelKey(key, rec.Ptr),
+				ChPtr:      rec.Ptr,
+				G:          rec.G,
+				Role:       rec.Role,
+				Source:     "paired",
+				PeerG:      gid,
+				MsgID:      msgID,
+			})
+			st.recordChannelActivity("recv", rec.G, channelID, rec.TimeMs)
+		} else if pendKey, ok := st.resolvePendingSelectRecv(key, ptr); ok {
+			// A select recv was observed before its matching send; count it as paired.
+			st.pendingSelectRecv[pendKey]--
+			if channelID != "" {
+				st.matchedPairsByChannel[channelID]++
+			}
+		} else {
+			st.sendsByKey[st.opKey(key, ptr)] = append(st.sendsByKey[st.opKey(key, ptr)], sendRecord{
+				TimeMs: t, G: gid, Role: st.Roles[gid], Ptr: ptr, MsgID: msgID,
+			})
+		}
+	}
+	if info.Kind == "recv" {
+		if mid, pg, ok := st.matchSelectRecv(info); ok {
+			msgID = mid
+			peerG = pg
+			// Mark as paired so audit can match against paired sends.
+			source = "paired"
+		}
+	}
+	if evName == "chan_send" {
+		st.incAudit(auditSelectChosenEmittedSend)
+	} else {
+		st.incAudit(auditSelectChosenEmittedRecv)
+	}
+	_ = emit(TimelineEvent{
+		TimeMs:     t,
+		Event:      evName,
+		G:          gid,
+		Role:       st.Roles[gid],
+		Channel:    info.ChName,
+		ChannelKey: info.ChKey,
+		ChPtr:      info.ChPtr,
+		MissingPtr: info.ChPtr == "",
+		SelectID:   sid,
+		PeerG:      peerG,
+		MsgID:      msgID,
+		Source:     source,
+	})
+	st.markProgress(t)
+	st.recordChannelActivity(info.Kind, gid, info.ChKey, t)
+	if st.Opt.EmitAtomic {
+		attID := st.newID("a")
+		commitID := st.newID("c")
+		atomAttempt := "chan_recv_attempt"
+		atomCommit := "chan_recv_commit"
+		if info.Kind == "send" {
+			atomAttempt = "chan_send_attempt"
+			atomCommit = "chan_send_commit"
+		}
+		_ = emit(TimelineEvent{
+			TimeMs:     t,
+			Event:      atomAttempt,
+			ID:         attID,
+			G:          gid,
+			Role:       st.Roles[gid],
+			Channel:    info.ChName,
+			ChannelKey: info.ChKey,
+			ChPtr:      info.ChPtr,
+			MissingPtr: info.ChPtr == "",
+			SelectID:   sid,
+			Source:     "select",
+		})
+		_ = emit(TimelineEvent{
+			TimeMs:     t,
+			Event:      atomCommit,
+			ID:         commitID,
+			AttemptID:  attID,
+			PairID:     attID,
+			G:          gid,
+			Role:       st.Roles[gid],
+			Channel:    info.ChName,
+			ChannelKey: info.ChKey,
+			ChPtr:      info.ChPtr,
+			MissingPtr: info.ChPtr == "",
+			SelectID:   sid,
+			Source:     "select",
+		})
+	}
+	st.selectEmitted[sid] = true
+	delete(st.selPending, sid)
+}
+
+func (st *ParseState) matchSelectRecv(info SelectCaseInfo) (int64, int64, bool) {
+	if info.ChName == "" && info.ChKey == "" && info.ChPtr == "" {
+		return 0, 0, false
+	}
+	ptr := info.ChPtr
+	if ptr == "" && isPointerString(info.ChKey) {
+		ptr = info.ChKey
+	}
+	key := parseChKey(info.ChName)
+	opKey := st.opKey(key, ptr)
+	q := st.sendsByKey[opKey]
+	if len(q) == 0 {
+		if altKey, altQ, ok := st.findSendQueueByName(key); ok {
+			opKey = altKey
+			q = altQ
+		}
+	}
+	if len(q) == 0 {
+		st.pendingSelectRecv[opKey]++
+		if key.Name != "" {
+			nameKey := st.opKey(key, "")
+			st.pendingSelectRecv[nameKey]++
+		}
+		return 0, 0, false
+	}
+	sr := q[0]
+	st.sendsByKey[opKey] = q[1:]
+	channelID := info.ChKey
+	if channelID == "" {
+		channelID = st.channelKey(key, info.ChPtr)
+	}
+	if channelID == "" {
+		st.unknownChannelID++
+	} else {
+		st.matchedPairsByChannel[channelID]++
+	}
+	return sr.MsgID, sr.G, true
+}
+
+func shouldSelectFallback() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("GTV_SELECT_FALLBACK")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+func (st *ParseState) handleSelectLog(gid int64, msg string, t float64, stack xtrace.Stack, emit func(TimelineEvent) error) {
+	typ, kv := parseSelectLogFields(msg)
+	if typ == "" {
+		return
 	}
 	sid := kv["id"]
 	if sid == "" {
@@ -1375,31 +3063,122 @@ func (st *ParseState) handleSelectLog(gid int64, msg string, t float64, stack xt
 		}
 		st.activeSelect[gid] = sid
 		delete(st.selectFallback, gid)
+		st.selectMeta[sid] = struct {
+			G      int64
+			TimeNs int64
+		}{G: gid, TimeNs: st.lastTimeNs}
 		_ = emit(TimelineEvent{TimeMs: t, Event: "select_begin", G: gid, Role: st.Roles[gid], SelectID: sid, Source: "log"})
 	case "select_case":
 		if sid == "" {
 			sid = st.activeSelect[gid]
 		}
+		st.incAudit(auditSelectCaseSeen)
 		att := kv["attempt"]
 		if att == "" {
 			att = st.activeAttempt[gid]
 		}
-		ch := kv["ch"]
-		_ = emit(TimelineEvent{TimeMs: t, Event: "select_case", G: gid, Role: st.Roles[gid], SelectID: sid, AttemptID: att, Channel: ch, Source: "log"})
+		kind := strings.ToLower(kv["kind"])
+		ptr := kv["ptr"]
+		ch := kv["name"]
+		if ch == "" {
+			ch = kv["ch"]
+		}
+		if ch != "" {
+			if _, parsed, ok := parseRegionOp(ch); ok && parsed != "" {
+				ch = parsed
+			}
+		}
+		idx := parseSelectIndex(kv["idx"])
+		chKey := ""
+		if ch != "" || ptr != "" {
+			ck := parseChKey(ch)
+			if ch == "" {
+				ck = parseChKey(ptr)
+			}
+			chKey = st.channelKey(ck, ptr)
+		}
+		info := SelectCaseInfo{
+			Kind:   kind,
+			ChPtr:  ptr,
+			ChKey:  chKey,
+			ChName: ch,
+			Role:   st.Roles[gid],
+			G:      gid,
+			TimeNs: st.lastTimeNs,
+			Index:  idx,
+		}
+		if ptr != "" && ch != "" {
+			st.channelNameByPtr[ptr] = ch
+		}
+		if sid != "" {
+			cases := st.selectCases[sid]
+			if idx >= 0 {
+				if len(cases) <= idx {
+					next := make([]SelectCaseInfo, idx+1)
+					copy(next, cases)
+					cases = next
+				}
+				cases[idx] = info
+			} else {
+				cases = append(cases, info)
+			}
+			st.selectCases[sid] = cases
+		}
+		_ = emit(TimelineEvent{
+			TimeMs:      t,
+			Event:       "select_case",
+			G:           gid,
+			Role:        st.Roles[gid],
+			SelectID:    sid,
+			SelectKind:  kind,
+			SelectIndex: idx,
+			AttemptID:   att,
+			Channel:     ch,
+			ChannelKey:  chKey,
+			ChPtr:       ptr,
+			Source:      "log",
+		})
 		if att != "" {
 			st.selCandidates[sid] = append(st.selCandidates[sid], att)
+		}
+		if sid != "" && st.selPending[sid] && !st.selectEmitted[sid] {
+			chosenIdx := st.selChosenIdx[sid]
+			if info, ok := st.selectCaseForChosen(sid, chosenIdx); ok {
+				st.emitSelectChosenCase(sid, info, t, gid, emit)
+			}
 		}
 	case "select_chosen":
 		if sid == "" {
 			sid = st.activeSelect[gid]
 		}
+		st.incAudit(auditSelectChosenSeen)
 		att := kv["attempt"]
 		if att == "" {
 			att = st.activeAttempt[gid]
 		}
+		idx := parseSelectIndex(kv["idx"])
 		st.selChosen[sid] = att
-		_ = emit(TimelineEvent{TimeMs: t, Event: "select_chosen", G: gid, Role: st.Roles[gid], SelectID: sid, AttemptID: att, Source: "log"})
-		st.maybeEmitSelectFallback(gid, sid, stack, t, emit)
+		st.selChosenIdx[sid] = idx
+		_ = emit(TimelineEvent{
+			TimeMs:      t,
+			Event:       "select_chosen",
+			G:           gid,
+			Role:        st.Roles[gid],
+			SelectID:    sid,
+			SelectIndex: idx,
+			AttemptID:   att,
+			Source:      "log",
+		})
+		if sid != "" && !st.selectEmitted[sid] {
+			if info, ok := st.selectCaseForChosen(sid, idx); ok {
+				st.emitSelectChosenCase(sid, info, t, gid, emit)
+			} else {
+				st.selPending[sid] = true
+			}
+		}
+		if shouldSelectFallback() {
+			st.maybeEmitSelectFallback(gid, sid, stack, t, emit)
+		}
 	case "select_end":
 		if sid == "" {
 			sid = st.activeSelect[gid]
@@ -1419,11 +3198,19 @@ func (st *ParseState) handleSelectLog(gid int64, msg string, t float64, stack xt
 			}
 			_ = emit(TimelineEvent{TimeMs: t, Event: "select_dropped", G: ag, Role: st.Roles[ag], SelectID: sid, AttemptID: att, Channel: ch, Dropped: true, Source: "log"})
 		}
+		if sid != "" && st.selPending[sid] && !st.selectEmitted[sid] {
+			st.incAudit(auditSelectChosenMissingCase)
+		}
 		// Cleanup
 		delete(st.selCandidates, sid)
 		delete(st.selChosen, sid)
+		delete(st.selChosenIdx, sid)
+		delete(st.selPending, sid)
 		delete(st.selectFallback, gid)
 		delete(st.activeSelect, gid)
+		delete(st.selectCases, sid)
+		delete(st.selectEmitted, sid)
+		delete(st.selectMeta, sid)
 		_ = emit(TimelineEvent{TimeMs: t, Event: "select_end", G: gid, Role: st.Roles[gid], SelectID: sid, Source: "log"})
 	}
 }
@@ -1459,6 +3246,38 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 	_ = st
 	normalized := make([]TimelineEvent, len(events))
 	warnings := make([]string, 0)
+	ptrAliases := map[string]string{}
+	aliasSeq := 0
+	nameByPtr := map[string]string{}
+	isAliasName := func(name string) bool {
+		if name == "" {
+			return false
+		}
+		low := strings.ToLower(strings.TrimSpace(name))
+		return strings.HasPrefix(low, "ch#") || strings.HasPrefix(low, "unknown:")
+	}
+	aliasForPtr := func(ptr string) string {
+		if ptr == "" {
+			return ""
+		}
+		if v, ok := ptrAliases[ptr]; ok {
+			return v
+		}
+		aliasSeq++
+		alias := fmt.Sprintf("ch#%d", aliasSeq)
+		ptrAliases[ptr] = alias
+		return alias
+	}
+	for _, ev := range events {
+		if ev.ChPtr != "" && ev.Channel != "" {
+			ptr := normalizePointer(ev.ChPtr)
+			if ptr != "" && !isPointerString(ev.Channel) && !isAliasName(ev.Channel) {
+				if _, ok := nameByPtr[ptr]; !ok {
+					nameByPtr[ptr] = ev.Channel
+				}
+			}
+		}
+	}
 	for i, ev := range events {
 		if ev.ChannelKey != "" {
 			ev.ChannelKey = normalizeChannelKey(ev.ChannelKey)
@@ -1466,14 +3285,41 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 		if ev.ChPtr != "" {
 			ev.ChPtr = normalizePointer(ev.ChPtr)
 		}
+		if ev.Channel == "" || isPointerString(ev.Channel) || isAliasName(ev.Channel) {
+			if ev.ChPtr != "" {
+				if mapped, ok := nameByPtr[ev.ChPtr]; ok {
+					ev.Channel = mapped
+				}
+			}
+		}
 		if ev.ChannelKey == "" {
 			if key := normalizeChannelKey(ev.Channel); key != "" {
 				ev.ChannelKey = key
 			}
 		}
-		if ev.ChPtr == "" {
+		if ev.ChannelKey != "" {
 			if key := normalizePointer(ev.ChannelKey); key != "" && isPointerString(key) {
-				ev.ChPtr = key
+				if ev.ChPtr == "" {
+					ev.ChPtr = key
+				}
+				alias := aliasForPtr(key)
+				if alias != "" {
+					ev.ChannelKey = alias
+					if ev.Channel == "" || isPointerString(ev.Channel) {
+						ev.Channel = alias
+					}
+				}
+			}
+		}
+		if ev.ChPtr != "" && isPointerString(ev.ChPtr) {
+			alias := aliasForPtr(ev.ChPtr)
+			if alias != "" {
+				if ev.ChannelKey == "" || isPointerString(ev.ChannelKey) {
+					ev.ChannelKey = alias
+				}
+				if ev.Channel == "" || isPointerString(ev.Channel) {
+					ev.Channel = alias
+				}
 			}
 		}
 		if ev.TimeNs == 0 {
@@ -1484,9 +3330,7 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 		}
 		name := strings.ToLower(ev.Event)
 		if isChannelEvent(name) && ev.ChannelKey == "" {
-			if ev.ChPtr != "" {
-				ev.ChannelKey = ev.ChPtr
-			} else if key := normalizeChannelKey(ev.Channel); key != "" {
+			if key := normalizeChannelKey(ev.Channel); key != "" {
 				ev.ChannelKey = key
 			}
 		}
@@ -1511,7 +3355,39 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 				warnings = append(warnings, fmt.Sprintf("missing pairing fields for %s (g=%d seq=%d time_ns=%d)", ev.Event, ev.G, ev.Seq, ev.TimeNs))
 			}
 		}
+		ev = AnnotateUnknownEndpoints(ev)
 		normalized[i] = ev
+	}
+	warningsV2 := make([]WarningEntry, 0, len(warnings))
+	for _, w := range warnings {
+		code := "warning"
+		msg := w
+		low := strings.ToLower(w)
+		switch {
+		case strings.HasPrefix(low, "missing goroutine id"):
+			code = "missing_goroutine_id"
+		case strings.HasPrefix(low, "missing channel identity"):
+			code = "missing_channel_identity"
+		case strings.HasPrefix(low, "missing pairing fields"):
+			code = "missing_pairing_fields"
+		case strings.HasPrefix(low, "validation: channel identity missing"):
+			code = "validation_channel_identity_missing"
+		}
+		warningsV2 = append(warningsV2, WarningEntry{Code: code, Message: msg})
+	}
+	beforeCount := len(normalized)
+	dropCounts := map[string]int64{}
+	if st != nil && normalizeMode(st.Opt.Mode) == "teach" {
+		filtered := make([]TimelineEvent, 0, len(normalized))
+		for _, ev := range normalized {
+			updated, keep, dropName := FilterTimelineEventForMode(ev, st.Opt.Mode)
+			if !keep {
+				dropCounts[dropName]++
+				continue
+			}
+			filtered = append(filtered, updated)
+		}
+		normalized = filtered
 	}
 	sort.SliceStable(normalized, func(i, j int) bool {
 		a := normalized[i]
@@ -1527,18 +3403,235 @@ func NormalizeTimeline(events []TimelineEvent, st *ParseState) TimelineEnvelope 
 		}
 		return strings.ToLower(a.Event) < strings.ToLower(b.Event)
 	})
+	normalized, auditSummary := mergeAuditSummaries(normalized)
 	warnings = append(warnings, validateChannelIdentities(normalized)...)
+	if st != nil && normalizeMode(st.Opt.Mode) == "teach" && len(normalized) > 0 {
+		afterCount := len(normalized)
+		if auditSummary.Event == "audit_summary" {
+			val, ok := auditSummary.Value.(map[string]any)
+			if !ok || val == nil {
+				val = map[string]any{}
+			}
+			val["mode"] = "teach"
+			val["events_before"] = beforeCount
+			val["events_after"] = afterCount
+			if len(dropCounts) > 0 {
+				val["mode_drop_counts"] = dropCounts
+			}
+			auditSummary.Value = val
+		}
+	}
+	if auditSummary.Event == "audit_summary" {
+		normalized = append(normalized, auditSummary)
+	}
+	if len(normalized) > 0 {
+		counts := make(map[string]int64)
+		for _, ev := range normalized {
+			if ev.Event == "" {
+				continue
+			}
+			counts[ev.Event]++
+		}
+		if len(normalized) > 0 && strings.ToLower(normalized[len(normalized)-1].Event) == "audit_summary" {
+			val, ok := normalized[len(normalized)-1].Value.(map[string]any)
+			if !ok || val == nil {
+				val = map[string]any{}
+			}
+			val["event_counts_by_type"] = counts
+			normalized[len(normalized)-1].Value = val
+		}
+	}
+	entities := buildEntitiesFromTimeline(normalized)
+	caps := computeCapabilities(normalized, entities)
 	return TimelineEnvelope{
 		SchemaVersion: TimelineSchemaVersion,
+		Capabilities:  caps,
 		Events:        normalized,
-		Warnings:      warnings,
+		Entities:      entities,
+		Warnings:      nil,
+		WarningsV2:    warningsV2,
 	}
 }
 
-func timelineChannelIdentity(ev TimelineEvent) string {
-	if ev.ChPtr != "" {
-		return ev.ChPtr
+func computeCapabilities(events []TimelineEvent, entities *EntitiesTable) []string {
+	caps := map[string]bool{}
+	if len(events) == 0 {
+		return nil
 	}
+	for _, ev := range events {
+		switch strings.ToLower(ev.Event) {
+		case "spawn":
+			caps["spawn_edges"] = true
+		case "chan_depth":
+			caps["chan_depth"] = true
+		case "select_case", "select_chosen", "select_begin", "select_end":
+			caps["select_cases"] = true
+		case "chan_send_attempt", "chan_recv_attempt", "chan_send_commit", "chan_recv_commit":
+			caps["attempt_commit"] = true
+		case "blocked_send", "blocked_receive", "go_block", "go_unblock":
+			caps["blocking_events"] = true
+		case "goroutine_created", "goroutine_started", "go_start":
+			caps["goroutine_lifecycle"] = true
+		}
+		if ev.File != "" && ev.Line > 0 {
+			caps["file_line"] = true
+		}
+		if ev.Role != "" {
+			caps["roles"] = true
+		}
+		if ev.BlockKind != "" || ev.UnblockKind != "" {
+			caps["block_kind"] = true
+		}
+	}
+	if entities != nil {
+		for _, ch := range entities.Channels {
+			if len(ch.Aliases) > 0 {
+				caps["channel_aliases"] = true
+				break
+			}
+		}
+	}
+	out := make([]string, 0, len(caps))
+	for k := range caps {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mergeAuditSummaries(events []TimelineEvent) ([]TimelineEvent, TimelineEvent) {
+	var merged TimelineEvent
+	out := make([]TimelineEvent, 0, len(events))
+	mergeValue := func(dst map[string]any, src any) map[string]any {
+		if dst == nil {
+			dst = map[string]any{}
+		}
+		switch v := src.(type) {
+		case map[string]any:
+			for k, val := range v {
+				dst[k] = val
+			}
+		case map[string]int64:
+			for k, val := range v {
+				dst[k] = val
+			}
+		case AuditSummary:
+			dst["dedup"] = v.Dedup
+			if len(v.Warnings) > 0 {
+				dst["warnings"] = v.Warnings
+			}
+		default:
+			if v != nil {
+				dst["summary"] = v
+			}
+		}
+		return dst
+	}
+	for _, ev := range events {
+		if strings.ToLower(ev.Event) != "audit_summary" {
+			out = append(out, ev)
+			continue
+		}
+		if merged.Event == "" {
+			merged = ev
+			merged.Value = mergeValue(nil, ev.Value)
+			continue
+		}
+		merged.Value = mergeValue(merged.Value.(map[string]any), ev.Value)
+		if ev.TimeNs > merged.TimeNs {
+			merged.TimeNs = ev.TimeNs
+			merged.TimeMs = ev.TimeMs
+		}
+		merged.Source = ev.Source
+	}
+	return out, merged
+}
+
+func buildEntitiesFromTimeline(events []TimelineEvent) *EntitiesTable {
+	if len(events) == 0 {
+		return nil
+	}
+	gMap := make(map[int64]GoroutineEntity)
+	chMap := make(map[string]ChannelEntity)
+	addAlias := func(ce *ChannelEntity, alias string) {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			return
+		}
+		for _, a := range ce.Aliases {
+			if a == alias {
+				return
+			}
+		}
+		ce.Aliases = append(ce.Aliases, alias)
+	}
+	for _, ev := range events {
+		if ev.G != 0 {
+			ge := gMap[ev.G]
+			if ge.GID == 0 {
+				ge.GID = ev.G
+			}
+			if ge.ParentGID == 0 && ev.ParentG != 0 {
+				ge.ParentGID = ev.ParentG
+			}
+			if ge.Func == "" && ev.Func != "" {
+				ge.Func = ev.Func
+			}
+			if ge.Role == "" && ev.Role != "" {
+				ge.Role = ev.Role
+			}
+			gMap[ev.G] = ge
+		}
+		name := strings.ToLower(ev.Event)
+		if isChannelEvent(name) || name == "chan_make" || name == "chan_close" {
+			id := timelineChannelIdentity(ev)
+			if id == "" {
+				continue
+			}
+			ce := chMap[id]
+			if ce.ChanID == "" {
+				ce.ChanID = id
+			}
+			if ce.ChPtr == "" && ev.ChPtr != "" {
+				ce.ChPtr = ev.ChPtr
+			}
+			if ce.Name == "" && ev.Channel != "" {
+				ce.Name = ev.Channel
+			}
+			if ev.Channel != "" {
+				addAlias(&ce, ev.Channel)
+			}
+			if ev.ChannelKey != "" {
+				addAlias(&ce, ev.ChannelKey)
+			}
+			if ev.ChPtr != "" {
+				addAlias(&ce, ev.ChPtr)
+			}
+			if ev.Event == "chan_make" {
+				if ce.ElemType == "" && ev.ElemType != "" {
+					ce.ElemType = ev.ElemType
+				}
+				if ce.Cap == 0 && ev.Cap > 0 {
+					ce.Cap = ev.Cap
+				}
+			}
+			chMap[id] = ce
+		}
+	}
+	goroutines := make([]GoroutineEntity, 0, len(gMap))
+	for _, g := range gMap {
+		goroutines = append(goroutines, g)
+	}
+	sort.Slice(goroutines, func(i, j int) bool { return goroutines[i].GID < goroutines[j].GID })
+	channels := make([]ChannelEntity, 0, len(chMap))
+	for _, ch := range chMap {
+		channels = append(channels, ch)
+	}
+	sort.Slice(channels, func(i, j int) bool { return channels[i].ChanID < channels[j].ChanID })
+	return &EntitiesTable{Goroutines: goroutines, Channels: channels}
+}
+
+func timelineChannelIdentity(ev TimelineEvent) string {
 	if ev.ChannelKey != "" {
 		return ev.ChannelKey
 	}
@@ -1547,8 +3640,8 @@ func timelineChannelIdentity(ev TimelineEvent) string {
 
 func isGoroutineEvent(name string) bool {
 	switch name {
-	case "goroutine_created", "goroutine_started", "go_start", "spawn", "worker_starting", "channels_created",
-		"blocked_send", "blocked_receive", "unblocked", "block", "unblock",
+	case "goroutine_created", "goroutine_started", "go_create", "go_start", "spawn", "worker_starting", "channels_created",
+		"blocked_send", "blocked_receive", "block_send", "block_recv", "unblocked", "block", "unblock",
 		"select_begin", "select_case", "select_chosen", "select_dropped", "select_end":
 		return true
 	default:
@@ -1561,7 +3654,7 @@ func isChannelEvent(name string) bool {
 	case "chan_make", "chan_close", "chan_send", "chan_recv", "chan_depth",
 		"send_complete", "recv_attempt", "recv_complete",
 		"chan_send_attempt", "chan_recv_attempt", "chan_send_commit", "chan_recv_commit",
-		"blocked_send", "blocked_receive", "block", "unblock", "select_case":
+		"blocked_send", "blocked_receive", "block_send", "block_recv", "block", "unblock", "select_case":
 		return true
 	default:
 		return false

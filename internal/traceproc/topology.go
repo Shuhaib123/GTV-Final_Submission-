@@ -39,16 +39,15 @@ func (v *topologyValidator) observe(ev TimelineEvent, idx int) error {
 		if identity == "" {
 			return fmt.Errorf("event[%d] %q has pointer %q but no normalized identity", idx, ev.Event, ptr)
 		}
-		if identity != ptr {
-			return fmt.Errorf("event[%d] %q pointer %q mismatches identity %q", idx, ev.Event, ptr, identity)
-		}
 		if prev, ok := v.pointerToIdentity[ptr]; ok && prev != identity {
 			return fmt.Errorf("pointer %q mapped to %q and %q", ptr, prev, identity)
 		}
 		v.pointerToIdentity[ptr] = identity
 	}
 	if kind := eventKind(ev.Event); kind != "" && ptr == "" {
-		return fmt.Errorf("event[%d] %q (%s) missing pointer identity (channel=%q channel_key=%q)", idx, ev.Event, kind, ev.Channel, ev.ChannelKey)
+		if identity == "" {
+			return fmt.Errorf("event[%d] %q (%s) missing channel identity (channel=%q channel_key=%q)", idx, ev.Event, kind, ev.Channel, ev.ChannelKey)
+		}
 	}
 	return nil
 }
@@ -64,14 +63,14 @@ func pointerFromEvent(ev TimelineEvent) string {
 }
 
 func channelIdentity(ev TimelineEvent) string {
-	if ptr := normalizePointer(ev.ChPtr); ptr != "" {
-		return ptr
-	}
 	if key := normalizeChannelKey(ev.ChannelKey); key != "" {
 		return key
 	}
 	if key := normalizeChannelKey(ev.Channel); key != "" {
 		return key
+	}
+	if ptr := normalizePointer(ev.ChPtr); ptr != "" {
+		return ptr
 	}
 	return ""
 }

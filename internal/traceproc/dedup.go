@@ -57,7 +57,11 @@ func DedupTimeline(in []TimelineEvent) ([]TimelineEvent, DedupAudit) {
 		if att == "" && (ev.Event == "chan_send_attempt" || ev.Event == "chan_recv_attempt") {
 			att = ev.ID
 		}
-		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, identity, ev.Event, att)
+		keyIdentity := identity
+		if keyIdentity == "" {
+			keyIdentity = fmt.Sprintf("unknown:%d:%d", ev.G, ev.Seq)
+		}
+		key := fmt.Sprintf("%d|%d|%s|%s|%s", tns, ev.G, keyIdentity, ev.Event, att)
 		if _, ok := seen[key]; ok {
 			audit.Dropped++
 			if identity == "" {

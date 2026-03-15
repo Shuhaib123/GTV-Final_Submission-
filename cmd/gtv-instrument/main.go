@@ -29,6 +29,7 @@ func main() {
 	grpcTasks := flag.Bool("grpc-tasks", false, "add tasks to gRPC handlers (methods)")
 	httpTasks := flag.Bool("http-tasks", false, "add tasks to HTTP handlers")
 	loopRegions := flag.Bool("loop-regions", false, "wrap safe loop bodies in regions")
+	syncValidation := flag.Bool("sync-validation", envBool("GTV_SYNC_VALIDATION"), "enforce sync-validation instrumentation preset (regions_logs + block/goroutine regions)")
 	valueLogs := flag.Bool("value-logs", instrumenter.ValueLogsEnv(false), "emit trace.Log(ctx,\"value\",...) annotations when regions_logs enabled")
 	includePkgs := flag.String("include-pkgs", "", "comma or pipe separated package patterns to include (others downgraded to tasks_only)")
 	excludePkgs := flag.String("exclude-pkgs", "", "comma or pipe separated package patterns to exclude (downgraded to tasks_only)")
@@ -38,6 +39,12 @@ func main() {
 	}
 	if *mvp {
 		_ = os.Setenv("GTV_MVP", "1")
+	}
+	if *syncValidation {
+		*level = "regions_logs"
+		*blockRegions = true
+		*gorRegions = true
+		*guard = true
 	}
 	split := func(s string) []string {
 		if s == "" {

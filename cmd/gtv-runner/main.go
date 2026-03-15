@@ -20,9 +20,13 @@ func main() {
 		log.Fatal("-workload is required")
 	}
 
-	// Start writing the runtime/trace stream to stdout. The live server reads
-	// ONLY stdout as a binary trace stream. Any textual prints must go to stderr.
-	if err := gtvtrace.Start(os.Stdout); err != nil {
+	// Start writing the runtime/trace stream. Prefer a dedicated file if provided.
+	traceOut := strings.TrimSpace(os.Getenv("GTV_TRACE_OUT"))
+	if traceOut != "" {
+		if err := gtvtrace.StartFile(traceOut); err != nil {
+			log.Fatal(err)
+		}
+	} else if err := gtvtrace.Start(os.Stdout); err != nil {
 		log.Fatal(err)
 	}
 	gtvtrace.InstallStopOnSignal()
@@ -32,6 +36,7 @@ func main() {
 	os.Stdout = os.Stderr
 	log.SetOutput(os.Stderr)
 	log.Printf("gtv-runner: requested workload=%q", *wl)
+	mvpMode := os.Getenv("GTV_MVP") == "1"
 	ctx, task := trace.NewTask(context.Background(), strings.Title(*wl))
 	defer gtvtrace.FlushIdempotent()
 	defer gtvtrace.StopIdempotent()
@@ -44,11 +49,19 @@ func main() {
 			case "broadcast":
 				workload.RunBroadcastProgram(ctx)
 			case "skipgraph_full":
+				if mvpMode {
+					log.Printf("gtv-runner: MVP mode active; falling back to pingpong")
+					workload.RunPingPongProgram(ctx)
+					break
+				}
 				workload.RunSkipGraphFullProgram(ctx)
 			case "mergesort":
+				if mvpMode {
+					log.Printf("gtv-runner: MVP mode active; falling back to pingpong")
+					workload.RunPingPongProgram(ctx)
+					break
+				}
 				workload.RunMergeSortProgram(ctx)
-			case "recvonly":
-				workload.RunRecvOnlyProgram(ctx)
 			default:
 				workload.RunPingPongProgram(ctx)
 			}
@@ -64,6 +77,8 @@ func main() {
 		case <-done:
 		case <-time.After(d):
 			log.Printf("gtv-runner: timeout %s reached; stopping trace", d)
+			task.End()
+			gtvtrace.StopFlushExit(0)
 		}
 	} else {
 		<-done

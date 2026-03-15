@@ -3,16 +3,20 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +49,10 @@ var (
 	optBCMode   string
 	optLiveLog  bool
 	optTimeout  string
+	optMVP      bool
+	optMode     string
+	goTraceMu   sync.Mutex
+	goTraceCmd  *exec.Cmd
 )
 
 func envBool(name string) bool {
@@ -98,6 +106,8 @@ func main() {
 	addrFlag := flag.String("addr", addrDefault, "HTTP listen address, e.g. :8080")
 	synthFlag := flag.Bool("synth", synthDefault, "synthesize *_send before unmatched *_recv")
 	dropFlag := flag.Bool("drop-block-no-ch", dropDefault, "drop blocked events without channel label")
+	mvpDefault := envBool("GTV_MVP")
+	mvpFlag := flag.Bool("mvp", mvpDefault, "force MVP defaults (disable IO/loop/HTTP/GRPC/value logs)")
 	wlDefault := os.Getenv("GTV_WORKLOAD")
 	if wlDefault == "" {
 		wlDefault = "pingpong"
@@ -115,6 +125,11 @@ func main() {
 		timeoutDefault = "10s"
 	}
 	timeoutFlag := flag.String("timeout", timeoutDefault, "runner timeout (e.g., 2s, 500ms); also sets GTV_TIMEOUT_MS for child")
+	modeDefault := strings.TrimSpace(os.Getenv("GTV_MODE"))
+	if modeDefault == "" {
+		modeDefault = "teach"
+	}
+	modeFlag := flag.String("mode", modeDefault, "event mode: teach or debug")
 	flag.Parse()
 	listenAddr = *addrFlag
 	optSynth = *synthFlag
@@ -123,19 +138,46 @@ func main() {
 	optBCMode = strings.ToLower(*bcModeFlag)
 	optLiveLog = *liveLogFlag
 	optTimeout = strings.TrimSpace(*timeoutFlag)
+	optMode = strings.ToLower(strings.TrimSpace(*modeFlag))
+	optMVP = *mvpFlag
+	if optMVP {
+		_ = os.Setenv("GTV_MVP", "1")
+	}
 
 	// Serve static assets from ./web
-	fs := http.FileServer(http.Dir("web"))
-	http.Handle("/", fs)
+	webRoot := "web"
+	if abs, err := filepath.Abs(webRoot); err == nil {
+		log.Printf("serving static web root: %s", abs)
+	}
+	fs := http.FileServer(http.Dir(webRoot))
+	http.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/pages/index/index.html", http.StatusFound)
+			return
+		}
+		// Dev-friendly: always serve the latest HTML/CSS/JS without browser cache surprises.
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		fs.ServeHTTP(w, r)
+	}))
 
 	// WebSocket endpoint that streams timeline events while the demo runs.
 	http.HandleFunc("/trace", traceHandler)
 
 	// Instrumentation endpoint: POST {code, workload_name}
 	http.HandleFunc("/instrument", instrumentHandler)
+	// Workload read endpoint: GET ?name=workload
+	http.HandleFunc("/workload", workloadHandler)
+	// Workload list endpoint: GET generated workloads under internal/workload
+	http.HandleFunc("/workloads", workloadsHandler)
 
 	// Run endpoint: spawns an isolated runner and returns a JSON array timeline
 	http.HandleFunc("/run", runOnceHTTP)
+	// Demo endpoint: runs pingpong and opens Go's native trace viewer.
+	http.HandleFunc("/demo/go-trace", demoGoTraceHTTP)
+	// Clear cached runner binaries
+	http.HandleFunc("/clear-build-cache", clearBuildCacheHTTP)
 
 	// Friendly log and launch browser if possible
 	host := strings.TrimPrefix(listenAddr, ":")
@@ -150,18 +192,74 @@ func main() {
 }
 
 type instrumentReq struct {
-	Code         string `json:"code"`
-	WorkloadName string `json:"workload_name"`
-	GuardLabels  *bool  `json:"guard_labels,omitempty"`
-	GorRegions   *bool  `json:"goroutine_regions,omitempty"`
-	Level        string `json:"level,omitempty"`
-	BlockRegions *bool  `json:"block_regions,omitempty"`
-	IORegions    *bool  `json:"io_regions,omitempty"`
-	IOJSON       *bool  `json:"io_json,omitempty"`
-	IODB         *bool  `json:"io_db,omitempty"`
-	IOHTTP       *bool  `json:"io_http,omitempty"`
-	IOOS         *bool  `json:"io_os,omitempty"`
-	ValueLogs    *bool  `json:"value_logs,omitempty"`
+	Code           string `json:"code"`
+	WorkloadName   string `json:"workload_name"`
+	GuardLabels    *bool  `json:"guard_labels,omitempty"`
+	GorRegions     *bool  `json:"goroutine_regions,omitempty"`
+	Level          string `json:"level,omitempty"`
+	SyncValidation *bool  `json:"sync_validation,omitempty"`
+	BlockRegions   *bool  `json:"block_regions,omitempty"`
+	IORegions      *bool  `json:"io_regions,omitempty"`
+	IOJSON         *bool  `json:"io_json,omitempty"`
+	IODB           *bool  `json:"io_db,omitempty"`
+	IOHTTP         *bool  `json:"io_http,omitempty"`
+	IOOS           *bool  `json:"io_os,omitempty"`
+	ValueLogs      *bool  `json:"value_logs,omitempty"`
+}
+
+func applySyncValidationPreset(opts *instrumenter.Options) {
+	if opts == nil {
+		return
+	}
+	// Sync validation requires rich labels + block wrappers for reliable sync topology.
+	opts.Level = "regions_logs"
+	opts.AddBlockRegions = true
+	opts.AddGoroutineRegions = true
+	opts.GuardDynamicLabels = true
+}
+
+func buildInstrumentOptions(req instrumentReq) (instrumenter.Options, bool) {
+	opts := instrumenter.Options{
+		GuardDynamicLabels:  true,
+		AddGoroutineRegions: true,
+		AddBlockRegions:     true,
+		Level:               "regions",
+	}
+	if req.GuardLabels != nil {
+		opts.GuardDynamicLabels = *req.GuardLabels
+	}
+	if req.GorRegions != nil {
+		opts.AddGoroutineRegions = *req.GorRegions
+	}
+	if req.BlockRegions != nil {
+		opts.AddBlockRegions = *req.BlockRegions
+	}
+	if req.IORegions != nil {
+		opts.AddIORegions = *req.IORegions
+	}
+	if req.IOJSON != nil {
+		opts.AddIOJSONRegions = *req.IOJSON
+	}
+	if req.IODB != nil {
+		opts.AddIODBRegions = *req.IODB
+	}
+	if req.IOHTTP != nil {
+		opts.AddIOHTTPRegions = *req.IOHTTP
+	}
+	if req.IOOS != nil {
+		opts.AddIOOSRegions = *req.IOOS
+	}
+	if req.ValueLogs != nil {
+		opts.AddValueLogs = *req.ValueLogs
+	}
+	if req.Level != "" {
+		opts.Level = strings.ToLower(req.Level)
+	}
+	syncValidation := req.SyncValidation != nil && *req.SyncValidation
+	if syncValidation {
+		applySyncValidationPreset(&opts)
+	}
+	return opts, syncValidation
 }
 
 func instrumentHandler(w http.ResponseWriter, r *http.Request) {
@@ -179,49 +277,13 @@ func instrumentHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing code or workload_name")
 		return
 	}
-	// Per-request instrumenter options (fallback to defaults when nil)
-	// start from current defaults by calling SetOptions with same values is cumbersome; instead rely on instrumenter reading env and its defaults, but prefer explicit request values when provided.
-	if req.GuardLabels != nil || req.GorRegions != nil || req.Level != "" || req.BlockRegions != nil || req.IORegions != nil || req.IOJSON != nil || req.IODB != nil || req.IOHTTP != nil || req.IOOS != nil {
-		// Build an options struct overriding only provided fields; keep default Level when empty
-		def := instrumenter.Options{}
-		// ask instrumenter to keep its defaults; we only set fields with provided values
-		if req.GuardLabels != nil {
-			def.GuardDynamicLabels = *req.GuardLabels
-		} else {
-			def.GuardDynamicLabels = true
-		}
-		if req.GorRegions != nil {
-			def.AddGoroutineRegions = *req.GorRegions
-		}
-		if req.BlockRegions != nil {
-			def.AddBlockRegions = *req.BlockRegions
-		}
-		if req.IORegions != nil {
-			def.AddIORegions = *req.IORegions
-		}
-		if req.IOJSON != nil {
-			def.AddIOJSONRegions = *req.IOJSON
-		}
-		if req.IODB != nil {
-			def.AddIODBRegions = *req.IODB
-		}
-		if req.IOHTTP != nil {
-			def.AddIOHTTPRegions = *req.IOHTTP
-		}
-		if req.IOOS != nil {
-			def.AddIOOSRegions = *req.IOOS
-		}
-		if req.ValueLogs != nil {
-			def.AddValueLogs = *req.ValueLogs
-		}
-		if req.Level != "" {
-			def.Level = strings.ToLower(req.Level)
-		} else {
-			def.Level = "regions"
-		}
-		// Block regions added below if field exists (needs new option)
+	// Per-request instrumenter options (fallback to defaults when nil).
+	needsOpts := req.GuardLabels != nil || req.GorRegions != nil || req.Level != "" || req.SyncValidation != nil || req.BlockRegions != nil || req.IORegions != nil || req.IOJSON != nil || req.IODB != nil || req.IOHTTP != nil || req.IOOS != nil || req.ValueLogs != nil
+	syncValidationApplied := false
+	if needsOpts || optMVP {
+		def, syncValidation := buildInstrumentOptions(req)
+		syncValidationApplied = syncValidation
 		instrumenter.SetOptions(def)
-		// If we later add BlockRegions to Options, set it here too via SetOptions
 	}
 	out, err := instrumenter.InstrumentProgram([]byte(req.Code), name)
 	if err != nil {
@@ -242,7 +304,84 @@ func instrumentHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "write error: "+err.Error())
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "workload": low, "file": path})
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "workload": low, "file": path, "sync_validation_applied": syncValidationApplied})
+}
+
+func workloadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing name")
+		return
+	}
+	for _, ch := range name {
+		if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '_' {
+			writeJSONError(w, http.StatusBadRequest, "invalid workload name")
+			return
+		}
+	}
+	low := strings.ToLower(name)
+	path := filepath.Join("internal", "workload", low+"_gen.go")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "workload not found")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(data)
+}
+
+func listGeneratedWorkloadNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		file := entry.Name()
+		if !strings.HasSuffix(file, "_gen.go") {
+			continue
+		}
+		name := strings.TrimSuffix(file, "_gen.go")
+		if name == "" {
+			continue
+		}
+		valid := true
+		for _, ch := range name {
+			if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '_' {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		names = append(names, strings.ToLower(name))
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func workloadsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	names, err := listGeneratedWorkloadNames(filepath.Join("internal", "workload"))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to list workloads")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"workloads": names,
+	})
 }
 
 // runOnceHTTP executes a workload in an external process and returns the
@@ -260,20 +399,56 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	synthQ := r.URL.Query().Get("synth")
 	dropQ := r.URL.Query().Get("drop_block_no_ch")
 	bcModeQ := r.URL.Query().Get("bc_mode")
+	modeQ := r.URL.Query().Get("mode")
+	timeoutMsQ := strings.TrimSpace(r.URL.Query().Get("timeout_ms"))
+	buildCacheQ := strings.TrimSpace(r.URL.Query().Get("build_cache"))
 	timeoutQ := strings.TrimSpace(r.URL.Query().Get("timeout"))
+	debugQ := strings.TrimSpace(r.URL.Query().Get("debug"))
+	timeoutMs := int64(0)
+	if timeoutMsQ != "" {
+		if v, err := strconv.ParseInt(timeoutMsQ, 10, 64); err == nil {
+			if v < 50 {
+				v = 50
+			}
+			if v > 20000 {
+				v = 20000
+			}
+			timeoutMs = v
+		}
+	}
 	if timeoutQ == "" {
 		if optTimeout != "" {
 			timeoutQ = optTimeout
 		} else {
-			timeoutQ = "4s"
+			timeoutQ = "1s"
 		}
 	}
-	timeoutDur, timeoutOK := parseTimeoutDuration(timeoutQ)
+	timeoutDur := time.Duration(timeoutMs) * time.Millisecond
+	timeoutOK := timeoutDur > 0
+	if !timeoutOK {
+		timeoutDur, timeoutOK = parseTimeoutDuration(timeoutQ)
+		if timeoutOK {
+			timeoutMs = int64(timeoutDur / time.Millisecond)
+		}
+	} else {
+		timeoutQ = fmt.Sprintf("%dms", timeoutMs)
+	}
 	var timeoutMS string
 	if timeoutOK {
-		timeoutMS = strconv.FormatInt(int64(timeoutDur/time.Millisecond), 10)
+		timeoutMS = strconv.FormatInt(timeoutMs, 10)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), runJSONTimeout)
+	ctxTimeout := runJSONTimeout
+	buildGrace := 8 * time.Second
+	if timeoutOK {
+		ctxTimeout = timeoutDur + buildGrace + 2*time.Second
+		if ctxTimeout < 10*time.Second {
+			ctxTimeout = 10 * time.Second
+		}
+		if ctxTimeout > runJSONTimeout {
+			ctxTimeout = runJSONTimeout
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), ctxTimeout)
 	defer cancel()
 	envBool := func(v string) bool {
 		v = strings.ToLower(strings.TrimSpace(v))
@@ -281,6 +456,12 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	optSynthHTTP := envBool(synthQ)
 	optDropHTTP := envBool(dropQ)
+	optBuildCache := buildCacheQ == "" || envBool(buildCacheQ)
+	optDebug := envBool(debugQ)
+	optModeHTTP := optMode
+	if modeQ != "" {
+		optModeHTTP = strings.ToLower(strings.TrimSpace(modeQ))
+	}
 
 	// Best-effort cleanup first; then ensure no duplicates for this tag
 	_ = cleanupOldWorkloadFiles("internal/workload", name)
@@ -294,9 +475,19 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	// Pass a bounded timeout so runs complete and JSON returns
 	// Pass a build tag so only the selected generated workload (if any) is included.
 	tagName := "workload_" + name
-	cmd := exec.CommandContext(ctx, "go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", name, "-timeout", timeoutQ)
+	binPath, cleanup, err := ensureRunnerBinary(ctx, tagName, name, optBuildCache)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer cleanup()
+
+	cmd := exec.CommandContext(ctx, binPath, "-workload", name, "-timeout", timeoutQ)
 	// Default bc_mode=blocking unless explicitly provided
 	env := os.Environ()
+	if optMVP {
+		env = append(env, "GTV_MVP=1")
+	}
 	if bcModeQ != "" {
 		env = append(env, "GTV_BC_MODE="+strings.ToLower(bcModeQ))
 	} else {
@@ -305,44 +496,88 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 	if timeoutMS != "" {
 		env = append(env, "GTV_TIMEOUT_MS="+timeoutMS)
 	}
+	traceTmp, err := os.CreateTemp("", "gtv-trace-*.out")
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "trace temp: "+err.Error())
+		return
+	}
+	tracePath := traceTmp.Name()
+	if err := traceTmp.Close(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "trace temp close: "+err.Error())
+		return
+	}
+	env = append(env, "GTV_TRACE_OUT="+tracePath)
 	cmd.Env = env
 	// Capture stderr so we can surface build/runtime errors back to the client
 	var errBuf strings.Builder
 	cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "runner stdout: "+err.Error())
-		return
-	}
+	cmd.Stdout = io.Discard
+	startTime := time.Now()
 	if err := cmd.Start(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "runner start: "+err.Error())
 		return
 	}
-	if timeoutOK {
-		withTimeoutSignals(cmd, timeoutDur)
+	waitErr := cmd.Wait()
+	exitDur := time.Since(startTime)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		log.Printf("runOnceHTTP: runner context aborted: %v", ctxErr)
+	} else if waitErr != nil {
+		log.Println("runOnceHTTP: runner wait:", waitErr)
 	}
-	// Tee raw trace bytes to trace.out while parsing.
-	outFile, err := os.Create("trace.out")
-	if err != nil {
-		_ = cmd.Process.Kill()
-		writeJSONError(w, http.StatusInternalServerError, "trace.out create: "+err.Error())
-		return
-	}
-	defer outFile.Close()
-	limiter := newTraceOutLimiter(outFile, maxTraceOutBytes)
-	tee := io.TeeReader(stdout, limiter)
-	reader, err := xtrace.NewReader(tee)
-	if err != nil {
-		// The runner likely failed to build/launch; include captured stderr for clarity
-		_ = cmd.Process.Kill()
+
+	traceInfo, statErr := os.Stat(tracePath)
+	if statErr == nil && traceInfo.Size() == 0 {
 		msg := strings.TrimSpace(errBuf.String())
 		if msg == "" {
-			msg = err.Error()
+			msg = "trace file empty (build may not have finished); try a larger timeout_ms"
 		}
-		writeJSONError(w, http.StatusInternalServerError, "runner error: "+msg)
+		if optDebug {
+			writeJSONErrorDetailsWithDebug(w, http.StatusInternalServerError, "trace read", msg, stderrTail(errBuf.String(), 20), map[string]string{
+				"trace_path": tracePath,
+				"trace_size": "0",
+				"exit_ms":    fmt.Sprintf("%d", exitDur.Milliseconds()),
+			})
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "trace read: "+msg)
 		return
 	}
-	opts := traceproc.Options{SynthOnRecv: optSynthHTTP, DropBlockNoCh: optDropHTTP, EmitAtomic: true}
+	traceFile, err := os.Open(tracePath)
+	if err != nil {
+		tail := stderrTail(errBuf.String(), 20)
+		if optDebug {
+			writeJSONErrorDetailsWithDebug(w, http.StatusInternalServerError, "trace open", err.Error(), tail, map[string]string{
+				"trace_path": tracePath,
+				"exit_ms":    fmt.Sprintf("%d", exitDur.Milliseconds()),
+			})
+			return
+		}
+		msg := err.Error()
+		if tail != "" {
+			msg = msg + " | stderr: " + tail
+		}
+		writeJSONError(w, http.StatusInternalServerError, "trace open: "+msg)
+		return
+	}
+	defer func() {
+		traceFile.Close()
+		_ = os.Remove(tracePath)
+	}()
+
+	reader, err := xtrace.NewReader(traceFile)
+	if err != nil {
+		tail := stderrTail(errBuf.String(), 20)
+		if optDebug {
+			writeJSONErrorDetailsWithDebug(w, http.StatusInternalServerError, "trace read", err.Error(), tail, map[string]string{
+				"trace_path": tracePath,
+				"exit_ms":    fmt.Sprintf("%d", exitDur.Milliseconds()),
+			})
+			return
+		}
+		writeJSONErrorDetails(w, http.StatusInternalServerError, "trace read", err.Error(), tail)
+		return
+	}
+	opts := traceproc.Options{SynthOnRecv: optSynthHTTP, DropBlockNoCh: optDropHTTP, EmitAtomic: true, Mode: optModeHTTP}
 	st := traceproc.NewParseState(opts)
 	var timeline []traceproc.TimelineEvent
 	emit := func(ev traceproc.TimelineEvent) error { timeline = append(timeline, ev); return nil }
@@ -353,34 +588,51 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			_ = cmd.Process.Kill()
-			msg := strings.TrimSpace(errBuf.String())
-			if msg == "" {
-				msg = err.Error()
+			tail := stderrTail(errBuf.String(), 20)
+			parseErr := err.Error()
+			if tail == "" {
+				tail = strings.TrimSpace(errBuf.String())
 			}
-			writeJSONError(w, http.StatusInternalServerError, "trace read: "+msg)
+			if optDebug {
+				writeJSONErrorDetailsWithDebug(w, http.StatusInternalServerError, "trace read", parseErr, tail, map[string]string{
+					"trace_path": tracePath,
+					"exit_ms":    fmt.Sprintf("%d", exitDur.Milliseconds()),
+				})
+				return
+			}
+			writeJSONErrorDetails(w, http.StatusInternalServerError, "trace read", parseErr, tail)
 			return
 		}
 		if err := traceproc.ProcessEvent(&ev, st, emit); err != nil {
-			_ = cmd.Process.Kill()
 			writeJSONError(w, http.StatusInternalServerError, "process: "+err.Error())
 			return
 		}
 	}
-	waitErr := cmd.Wait()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		log.Printf("runOnceHTTP: runner context aborted: %v", ctxErr)
-	} else if waitErr != nil {
-		log.Println("runOnceHTTP: runner wait:", waitErr)
+	if err := traceproc.EmitAuditSummary(st, emit, "run"); err != nil {
+		log.Println("audit summary:", err)
 	}
 	// Deduplicate exact duplicates and write atomically to avoid truncation.
 	timeline = dedupTimeline(timeline)
-	if limiter != nil && limiter.Limited() {
-		log.Printf("trace.out truncated to %d bytes (limit %d)", limiter.written, limiter.max)
+	payload := traceproc.NormalizeTimeline(timeline, st)
+	unmatchedByCh, unmatchedTotals, auditWarnings := traceproc.ComputeUnmatchedAuditFromEvents(payload.Events)
+	payload.Events = traceproc.MergeUnmatchedAuditIntoSummary(payload.Events, unmatchedByCh, unmatchedTotals, auditWarnings)
+
+	// Copy trace bytes to trace.out (best-effort, bounded).
+	if src, err := os.Open(tracePath); err == nil {
+		if outFile, err := os.Create("trace.out"); err == nil {
+			limiter := newTraceOutLimiter(outFile, maxTraceOutBytes)
+			_, _ = io.Copy(limiter, src)
+			_ = outFile.Close()
+			if limiter != nil && limiter.Limited() {
+				log.Printf("trace.out truncated to %d bytes (limit %d)", limiter.written, limiter.max)
+			}
+		}
+		_ = src.Close()
 	}
-	if err := writeJSONAtomic("trace.json", timeline); err != nil {
+	if err := writeJSONAtomic("trace.json", payload); err != nil {
 		log.Println("write trace.json:", err)
 	}
-	if err := writeJSONAtomic(filepath.Join("web", "trace.json"), timeline); err != nil {
+	if err := writeJSONAtomic(filepath.Join("web", "trace.json"), payload); err != nil {
 		log.Println("write web/trace.json:", err)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -388,15 +640,305 @@ func runOnceHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Trace-Status", ctxErr.Error())
 	}
 	enc := json.NewEncoder(w)
-	if err := enc.Encode(timeline); err != nil {
+	if err := enc.Encode(payload); err != nil {
 		log.Println("encode timeline:", err)
 	}
+}
+
+func demoGoTraceHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	timeoutQ := strings.TrimSpace(r.URL.Query().Get("timeout"))
+	if timeoutQ == "" {
+		if optTimeout != "" {
+			timeoutQ = optTimeout
+		} else {
+			timeoutQ = "2s"
+		}
+	}
+	if _, ok := parseTimeoutDuration(timeoutQ); !ok {
+		writeJSONError(w, http.StatusBadRequest, "invalid timeout")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+
+	if err := runPingPongTraceOut(ctx, timeoutQ); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	viewerURL, err := launchGoTraceViewer("trace.out")
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status": "ok",
+		"url":    viewerURL,
+	})
+}
+
+func runPingPongTraceOut(ctx context.Context, timeoutQ string) error {
+	binPath, cleanup, err := ensureRunnerBinary(ctx, "workload_pingpong", "pingpong", true)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	cmd := exec.CommandContext(ctx, binPath, "-workload", "pingpong", "-timeout", timeoutQ)
+	env := os.Environ()
+	if optMVP {
+		env = append(env, "GTV_MVP=1")
+	}
+	env = append(env, "GTV_BC_MODE=blocking", "GTV_TRACE_OUT=trace.out")
+	if d, ok := parseTimeoutDuration(timeoutQ); ok {
+		env = append(env, "GTV_TIMEOUT_MS="+strconv.FormatInt(int64(d/time.Millisecond), 10))
+	}
+	cmd.Env = env
+	cmd.Stdout = io.Discard
+	var errBuf strings.Builder
+	cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(errBuf.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("demo run failed: %s", msg)
+	}
+	info, err := os.Stat("trace.out")
+	if err != nil {
+		return fmt.Errorf("trace.out not found: %w", err)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("trace.out is empty after pingpong run")
+	}
+	return nil
+}
+
+func launchGoTraceViewer(traceFile string) (string, error) {
+	info, err := os.Stat(traceFile)
+	if err != nil {
+		return "", fmt.Errorf("trace file missing: %w", err)
+	}
+	if info.Size() == 0 {
+		return "", fmt.Errorf("trace file is empty: %s", traceFile)
+	}
+	addr, err := reserveLoopbackAddr()
+	if err != nil {
+		return "", fmt.Errorf("viewer addr: %w", err)
+	}
+	url := "http://" + addr
+	cmd := exec.Command("go", "tool", "trace", "-http="+addr, traceFile)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	goTraceMu.Lock()
+	if goTraceCmd != nil && goTraceCmd.Process != nil {
+		_ = goTraceCmd.Process.Kill()
+	}
+	goTraceCmd = nil
+	if err := cmd.Start(); err != nil {
+		goTraceMu.Unlock()
+		return "", fmt.Errorf("go tool trace start: %w", err)
+	}
+	goTraceCmd = cmd
+	goTraceMu.Unlock()
+
+	go func(c *exec.Cmd) {
+		if err := c.Wait(); err != nil {
+			log.Printf("go trace viewer exited: %v", err)
+		}
+		goTraceMu.Lock()
+		if goTraceCmd == c {
+			goTraceCmd = nil
+		}
+		goTraceMu.Unlock()
+	}(cmd)
+
+	if err := waitForViewerReady(url, 8*time.Second); err != nil {
+		goTraceMu.Lock()
+		if goTraceCmd == cmd && goTraceCmd.Process != nil {
+			_ = goTraceCmd.Process.Kill()
+			goTraceCmd = nil
+		}
+		goTraceMu.Unlock()
+		return "", err
+	}
+	return url, nil
+}
+
+func reserveLoopbackAddr() (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr, nil
+}
+
+func waitForViewerReady(url string, timeout time.Duration) error {
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode < http.StatusInternalServerError {
+				return nil
+			}
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+	return fmt.Errorf("go trace viewer did not start in time")
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func writeJSONErrorDetails(w http.ResponseWriter, status int, msg, parseErr, stderrTail string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	payload := map[string]string{"error": msg}
+	if parseErr != "" {
+		payload["parse_error"] = parseErr
+	}
+	if stderrTail != "" {
+		payload["stderr_tail"] = stderrTail
+	}
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeJSONErrorDetailsWithDebug(w http.ResponseWriter, status int, msg, parseErr, stderrTail string, debug map[string]string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	payload := map[string]any{"error": msg}
+	if parseErr != "" {
+		payload["parse_error"] = parseErr
+	}
+	if stderrTail != "" {
+		payload["stderr_tail"] = stderrTail
+	}
+	if len(debug) > 0 {
+		payload["debug"] = debug
+	}
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func stderrTail(stderr string, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(stderr), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.TrimSpace(strings.Join(lines, " | "))
+}
+
+func clearBuildCacheHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	cacheDir := filepath.Join(os.TempDir(), "gtv-build")
+	if err := os.RemoveAll(cacheDir); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "clear cache: "+err.Error())
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func workloadHash(name string) string {
+	genPath := filepath.Join("internal", "workload", name+"_gen.go")
+	data, err := os.ReadFile(genPath)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func ensureRunnerBinary(ctx context.Context, tagName, name string, useCache bool) (string, func(), error) {
+	buildCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cleanup := func() {}
+	if useCache {
+		cacheDir := filepath.Join(os.TempDir(), "gtv-build")
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			return "", cleanup, fmt.Errorf("runner cache: %w", err)
+		}
+		hash := workloadHash(name)
+		short := ""
+		if hash != "" {
+			if len(hash) > 12 {
+				short = hash[:12]
+			} else {
+				short = hash
+			}
+		}
+		base := "gtv-runner-" + tagName
+		if short != "" {
+			base += "-" + short
+		}
+		if runtime.GOOS == "windows" {
+			base += ".exe"
+		}
+		binPath := filepath.Join(cacheDir, base)
+		stale := true
+		if binInfo, err := os.Stat(binPath); err == nil {
+			stale = false
+			genPath := filepath.Join("internal", "workload", name+"_gen.go")
+			if genInfo, err := os.Stat(genPath); err == nil {
+				if genInfo.ModTime().After(binInfo.ModTime()) {
+					stale = true
+				}
+			}
+		}
+		if !stale {
+			return binPath, cleanup, nil
+		}
+		if err := buildRunner(buildCtx, tagName, binPath); err != nil {
+			return "", cleanup, err
+		}
+		return binPath, cleanup, nil
+	}
+	binFile, err := os.CreateTemp("", "gtv-runner-*")
+	if err != nil {
+		return "", cleanup, fmt.Errorf("runner temp: %w", err)
+	}
+	binPath := binFile.Name()
+	_ = binFile.Close()
+	cleanup = func() { _ = os.Remove(binPath) }
+	if err := buildRunner(buildCtx, tagName, binPath); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return binPath, cleanup, nil
+}
+
+func buildRunner(ctx context.Context, tagName, binPath string) error {
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-tags", tagName, "-o", binPath, "./cmd/gtv-runner")
+	buildCmd.Dir = "."
+	var buildErr strings.Builder
+	buildCmd.Stderr = &buildErr
+	if err := buildCmd.Run(); err != nil {
+		msg := strings.TrimSpace(buildErr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("runner build: %s", msg)
+	}
+	return nil
 }
 
 // dedupTimeline removes exact duplicate parser emissions while preserving order.
@@ -602,6 +1144,9 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 	synthQ := q.Get("synth")
 	dropQ := q.Get("drop_block_no_ch")
 	bcModeQ := q.Get("bc_mode")
+	modeQ := q.Get("mode")
+	timeoutMsQ := strings.TrimSpace(q.Get("timeout_ms"))
+	timeoutQ := strings.TrimSpace(q.Get("timeout"))
 	envBool := func(v string) bool {
 		v = strings.ToLower(strings.TrimSpace(v))
 		return v == "1" || v == "true" || v == "yes"
@@ -614,6 +1159,38 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 	if dropQ != "" {
 		useDrop = envBool(dropQ)
 	}
+	useMode := optMode
+	if modeQ != "" {
+		useMode = strings.ToLower(strings.TrimSpace(modeQ))
+	}
+	timeoutOverride := ""
+	timeoutMs := int64(0)
+	if timeoutMsQ != "" {
+		if v, err := strconv.ParseInt(timeoutMsQ, 10, 64); err == nil {
+			if v < 50 {
+				v = 50
+			}
+			if v > 20000 {
+				v = 20000
+			}
+			timeoutMs = v
+		}
+	}
+	if timeoutMs > 0 {
+		timeoutOverride = fmt.Sprintf("%dms", timeoutMs)
+	} else if timeoutQ != "" {
+		timeoutOverride = timeoutQ
+	}
+	timeoutInfo := timeoutOverride
+	if timeoutInfo == "" {
+		timeoutInfo = optTimeout
+	}
+	timeoutInfoMs := int64(0)
+	if timeoutInfo != "" {
+		if dur, ok := parseTimeoutDuration(timeoutInfo); ok {
+			timeoutInfoMs = int64(dur / time.Millisecond)
+		}
+	}
 
 	// Announce server options to client for HUD display
 	_ = writeJSONWithDeadline(conn, struct {
@@ -622,13 +1199,17 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 		Synth         bool   `json:"synth"`
 		DropBlockNoCh bool   `json:"drop_block_no_ch"`
 		Workload      string `json:"workload"`
+		MVP           bool   `json:"mvp"`
+		Mode          string `json:"mode"`
 		BCMode        string `json:"bc_mode,omitempty"`
+		Timeout       string `json:"timeout,omitempty"`
+		TimeoutMs     int64  `json:"timeout_ms,omitempty"`
 	}{Type: "server_info", Addr: listenAddr, Synth: useSynth, DropBlockNoCh: useDrop, Workload: wl, BCMode: func() string {
 		if bcModeQ != "" {
 			return bcModeQ
 		}
 		return optBCMode
-	}()})
+	}(), MVP: optMVP, Mode: useMode, Timeout: timeoutInfo, TimeoutMs: timeoutInfoMs})
 
 	// Read simple text commands from the client. "start" triggers a run.
 	for {
@@ -646,7 +1227,7 @@ func traceHandler(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(string(data)) != "start" {
 			continue
 		}
-		if err := runOnce(conn, wl, useSynth, useDrop, bcModeQ); err != nil {
+		if err := runOnce(conn, wl, useSynth, useDrop, useMode, bcModeQ, timeoutOverride); err != nil {
 			if err == io.EOF {
 				// normal end of stream
 				continue
@@ -754,7 +1335,7 @@ func sendSnapshotWS(conn *websocket.Conn, runID string, events []traceproc.Timel
 }
 
 // runOnce runs the demo under runtime/trace and streams events over the given WS connection.
-func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) error {
+func runOnce(conn *websocket.Conn, wl string, synth, drop bool, mode string, bcMode string, timeoutOverride string) error {
 	// All writes to conn occur in this goroutine (snapshot + live event streaming).
 	// If you ever add ping/status pushes, send them through the same path (or through a dedicated write loop/channel).
 	// Best-effort cleanup of stale duplicate workload files before the duplicate check.
@@ -771,7 +1352,10 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 	// Use a modest timeout for live runs to avoid hanging sessions
 	// Always pass a single workload-specific tag; files without build tags are still compiled.
 	tagName := "workload_" + wl
-	timeoutStr := optTimeout
+	timeoutStr := strings.TrimSpace(timeoutOverride)
+	if timeoutStr == "" {
+		timeoutStr = optTimeout
+	}
 	if timeoutStr == "" {
 		timeoutStr = "10s"
 	}
@@ -782,6 +1366,9 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 	}
 	cmd := exec.Command("go", "run", "-tags", tagName, "./cmd/gtv-runner", "-workload", wl, "-timeout", timeoutStr)
 	env := os.Environ()
+	if optMVP {
+		env = append(env, "GTV_MVP=1")
+	}
 	if bcMode != "" {
 		env = append(env, "GTV_BC_MODE="+strings.ToLower(bcMode))
 	}
@@ -830,7 +1417,7 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		err := streamTraceEvents(tee, cmd, runID, synth, drop, optLiveLog, func(ev traceproc.TimelineEvent) error {
+		err := streamTraceEvents(tee, cmd, runID, synth, drop, mode, optLiveLog, func(ev traceproc.TimelineEvent) error {
 			eventCh <- ev
 			return nil
 		}, record)
@@ -918,14 +1505,106 @@ func runOnce(conn *websocket.Conn, wl string, synth, drop bool, bcMode string) e
 	return nil
 }
 
-func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, drop bool, liveLog bool, emit func(traceproc.TimelineEvent) error, record func(traceproc.TimelineEvent) error) error {
+func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, drop bool, mode string, liveLog bool, emit func(traceproc.TimelineEvent) error, record func(traceproc.TimelineEvent) error) error {
 	traceReader, err := xtrace.NewReader(reader)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		return err
 	}
-	opts := traceproc.Options{SynthOnRecv: synth, DropBlockNoCh: drop, EmitAtomic: true}
+	opts := traceproc.Options{SynthOnRecv: synth, DropBlockNoCh: drop, EmitAtomic: true, Mode: mode}
 	st := traceproc.NewParseState(opts)
+	ptrAliases := map[string]string{}
+	nameByPtr := map[string]string{}
+	nameByKey := map[string]string{}
+	aliasSeq := 0
+	normalizePointer := func(ptr string) string {
+		v := strings.TrimSpace(ptr)
+		if strings.HasPrefix(v, "ptr=") {
+			v = strings.TrimSpace(strings.TrimPrefix(v, "ptr="))
+		}
+		return v
+	}
+	isPointerString := func(v string) bool {
+		s := strings.ToLower(strings.TrimSpace(v))
+		return strings.HasPrefix(s, "0x")
+	}
+	isAliasName := func(v string) bool {
+		s := strings.ToLower(strings.TrimSpace(v))
+		return strings.HasPrefix(s, "ch#") || strings.HasPrefix(s, "unknown:")
+	}
+	isHumanName := func(v string) bool {
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return false
+		}
+		return !isPointerString(s) && !isAliasName(s)
+	}
+	aliasForPtr := func(ptr string) string {
+		key := normalizePointer(ptr)
+		if key == "" || !isPointerString(key) {
+			return ""
+		}
+		if alias, ok := ptrAliases[key]; ok {
+			return alias
+		}
+		aliasSeq++
+		alias := fmt.Sprintf("ch#%d", aliasSeq)
+		ptrAliases[key] = alias
+		return alias
+	}
+	normalizeLiveEvent := func(ev traceproc.TimelineEvent) traceproc.TimelineEvent {
+		ev.Channel = strings.TrimSpace(ev.Channel)
+		ev.ChannelKey = strings.TrimSpace(ev.ChannelKey)
+		ev.ChPtr = normalizePointer(ev.ChPtr)
+		if ev.ChPtr == "" {
+			if maybePtr := normalizePointer(ev.ChannelKey); isPointerString(maybePtr) {
+				ev.ChPtr = maybePtr
+			}
+		}
+		if isHumanName(ev.Channel) {
+			if ev.ChPtr != "" {
+				if _, ok := nameByPtr[ev.ChPtr]; !ok {
+					nameByPtr[ev.ChPtr] = ev.Channel
+				}
+			}
+			if ev.ChannelKey != "" {
+				nameByKey[ev.ChannelKey] = ev.Channel
+			}
+		}
+		if ev.Channel == "" || isPointerString(ev.Channel) || isAliasName(ev.Channel) {
+			if ev.ChPtr != "" {
+				if mapped := strings.TrimSpace(nameByPtr[ev.ChPtr]); mapped != "" {
+					ev.Channel = mapped
+				}
+			}
+			if (ev.Channel == "" || isPointerString(ev.Channel) || isAliasName(ev.Channel)) && ev.ChannelKey != "" {
+				if mapped := strings.TrimSpace(nameByKey[ev.ChannelKey]); mapped != "" {
+					ev.Channel = mapped
+				}
+			}
+		}
+		if ev.ChPtr != "" {
+			if alias := aliasForPtr(ev.ChPtr); alias != "" {
+				if ev.ChannelKey == "" || isPointerString(ev.ChannelKey) {
+					ev.ChannelKey = alias
+				}
+				if ev.Channel == "" || isPointerString(ev.Channel) || isAliasName(ev.Channel) {
+					if mapped := strings.TrimSpace(nameByPtr[ev.ChPtr]); mapped != "" {
+						ev.Channel = mapped
+					} else {
+						ev.Channel = alias
+					}
+				}
+				if isHumanName(ev.Channel) {
+					nameByKey[alias] = ev.Channel
+				}
+			}
+		}
+		if ev.ChannelKey != "" {
+			nameByKey[ev.ChannelKey] = strings.TrimSpace(firstNonEmpty(nameByKey[ev.ChannelKey], ev.Channel))
+		}
+		return ev
+	}
 	var liveLogFile *os.File
 	var liveLogCount int
 	if liveLog {
@@ -958,6 +1637,13 @@ func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, dro
 	}()
 	var seq int64
 	emitWithSeq := func(ev traceproc.TimelineEvent) error {
+		if updated, keep, _ := traceproc.FilterTimelineEventForMode(ev, opts.Mode); !keep {
+			return nil
+		} else {
+			ev = updated
+		}
+		ev = normalizeLiveEvent(ev)
+		ev = traceproc.AnnotateUnknownEndpoints(ev)
 		seq++
 		ev.Seq = seq
 		if record != nil {
@@ -972,6 +1658,7 @@ func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, dro
 		ev, err := traceReader.ReadEvent()
 		if err != nil {
 			if err == io.EOF {
+				_ = traceproc.EmitAuditSummary(st, emitWithSeq, "live")
 				_ = cmd.Wait()
 				return nil
 			}
@@ -1006,6 +1693,15 @@ func streamTraceEvents(reader io.Reader, cmd *exec.Cmd, runID string, synth, dro
 			return err
 		}
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func openBrowser(url string) error {
