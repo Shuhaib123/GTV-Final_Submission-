@@ -140,6 +140,96 @@ const API_BASE = (() => {
       return items.map((x) => String(x || '').trim().toLowerCase()).filter(Boolean);
     }
 
+    const workloadPickerDialog = $('#workloadPickerDialog');
+    const workloadPickerSearch = $('#workloadPickerSearch');
+    const workloadPickerList = $('#workloadPickerList');
+    const workloadPickerCount = $('#workloadPickerCount');
+    const workloadPickerCancel = $('#workloadPickerCancel');
+    let workloadPickerRows = [];
+    let workloadPickerResolve = null;
+
+    function closeWorkloadPicker(value){
+      if (workloadPickerResolve) {
+        const resolve = workloadPickerResolve;
+        workloadPickerResolve = null;
+        resolve(value || null);
+      }
+      if (workloadPickerDialog?.open) workloadPickerDialog.close();
+    }
+
+    function renderWorkloadPickerList(filterText){
+      if (!workloadPickerList) return;
+      const filter = String(filterText || '').trim().toLowerCase();
+      const rows = !filter
+        ? workloadPickerRows
+        : workloadPickerRows.filter((name) => name.includes(filter));
+      workloadPickerList.innerHTML = '';
+      if (workloadPickerCount) {
+        workloadPickerCount.textContent = `${rows.length} of ${workloadPickerRows.length} workload(s)`;
+      }
+      if (!rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'workload-picker-empty';
+        empty.textContent = 'No workload matches this filter.';
+        workloadPickerList.appendChild(empty);
+        return;
+      }
+      rows.forEach((name) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'workload-picker-item';
+        btn.textContent = name;
+        btn.dataset.name = name;
+        workloadPickerList.appendChild(btn);
+      });
+    }
+
+    function pickWorkloadFromDialog(workloads, suggested){
+      if (!workloadPickerDialog || typeof workloadPickerDialog.showModal !== 'function') {
+        const preview = workloads.slice(0, 20).join(', ');
+        const suffix = workloads.length > 20 ? ` ... (+${workloads.length - 20} more)` : '';
+        const fallback = window.prompt(
+          `Load from internal/workload.\nEnter workload name.\nAvailable: ${preview}${suffix}`,
+          suggested,
+        );
+        return Promise.resolve(fallback ? fallback.trim().toLowerCase() : null);
+      }
+      workloadPickerRows = workloads.slice().sort((a, b) => a.localeCompare(b));
+      workloadPickerSearch.value = suggested || '';
+      renderWorkloadPickerList(workloadPickerSearch.value);
+      if (!workloadPickerDialog.open) workloadPickerDialog.showModal();
+      setTimeout(() => {
+        workloadPickerSearch.focus();
+        workloadPickerSearch.select();
+      }, 0);
+      return new Promise((resolve) => { workloadPickerResolve = resolve; });
+    }
+
+    workloadPickerSearch?.addEventListener('input', (e) => {
+      renderWorkloadPickerList(e.target?.value || '');
+    });
+
+    workloadPickerList?.addEventListener('click', (e) => {
+      const button = e.target?.closest?.('.workload-picker-item');
+      if (!button) return;
+      closeWorkloadPicker((button.dataset.name || '').trim().toLowerCase());
+    });
+
+    workloadPickerCancel?.addEventListener('click', () => closeWorkloadPicker(null));
+
+    workloadPickerDialog?.addEventListener('cancel', (e) => {
+      e.preventDefault();
+      closeWorkloadPicker(null);
+    });
+
+    workloadPickerDialog?.addEventListener('close', () => {
+      if (workloadPickerResolve) {
+        const resolve = workloadPickerResolve;
+        workloadPickerResolve = null;
+        resolve(null);
+      }
+    });
+
     async function loadWorkloadByName(name){
       const wlRes = await apiFetch(`/workload?name=${encodeURIComponent(name)}`);
       if (!wlRes.ok) {
@@ -160,14 +250,7 @@ const API_BASE = (() => {
         }
         const current = (activeWorkloadName || ($('#name').value || '')).trim().toLowerCase();
         const suggested = workloads.includes(current) ? current : workloads[0];
-        const preview = workloads.slice(0, 20).join(', ');
-        const suffix = workloads.length > 20 ? ` ... (+${workloads.length - 20} more)` : '';
-        const picked = window.prompt(
-          `Load from internal/workload.\nEnter workload name.\nAvailable: ${preview}${suffix}`,
-          suggested,
-        );
-        if (picked === null) return;
-        const name = picked.trim().toLowerCase();
+        const name = await pickWorkloadFromDialog(workloads, suggested);
         if (!name) {
           setStatus('No workload selected.');
           return;

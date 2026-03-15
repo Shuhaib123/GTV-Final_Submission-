@@ -195,5 +195,18 @@ func main(){
 
     </div>
   </main>
+
+  <dialog id="workloadPickerDialog" class="workload-picker-dialog">
+    <div class="workload-picker-card">
+      <h3>Load Workload</h3>
+      <div class="mini">Choose from <code>internal/workload</code>.</div>
+      <input id="workloadPickerSearch" type="text" placeholder="Search workload name..." autocomplete="off" />
+      <div id="workloadPickerCount" class="mini"></div>
+      <div id="workloadPickerList" class="workload-picker-list" role="listbox" aria-label="Generated workloads"></div>
+      <div class="workload-picker-actions">
+        <button id="workloadPickerCancel" class="btn ghost" type="button">Cancel</button>
+      </div>
+    </div>
+  </dialog>
 </body>
 </html>
