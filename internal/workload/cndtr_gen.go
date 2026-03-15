@@ -1,5 +1,5 @@
-//go:build workload_crdntr
-// +build workload_crdntr
+//go:build workload_cndtr
+// +build workload_cndtr
 
 package workload
 
@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 	"runtime/trace"
+	"jspt/internal/gtvtrace"
 	"sync/atomic"
 )
 
@@ -19,12 +20,16 @@ type msg struct {
 	phase	int
 }
 
-func RuncrdntrProgram(__jspt_ctx_5 context.Context) {
+func RuncndtrProgram(__jspt_ctx_8 context.Context) {
 	var __jspt_wg_0 sync.WaitGroup
 	defer __jspt_wg_0.Wait()
-	__jspt_ctx_5, __jspt_task_6 := trace.NewTask(__jspt_ctx_5, "crdntr")
-	defer __jspt_task_6.End()
-	trace.Log(__jspt_ctx_5, "main", "crdntr starting")
+	gtvtrace.InstallStopOnSignal()
+	gtvtrace.InstallStopAfterFromEnv("GTV_TIMEOUT_MS",
+	)
+	__jspt_ctx_8, __jspt_task_9 := trace.NewTask(__jspt_ctx_8, "cndtr")
+	defer __jspt_task_9.End()
+	trace.Log(__jspt_ctx_8, "main", "cndtr starting")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
 
@@ -33,7 +38,7 @@ func RuncrdntrProgram(__jspt_ctx_5 context.Context) {
 
 	updates := make(chan msg, 32)
 	if trace.IsEnabled() {
-		trace.Log(__jspt_ctx_5,
+		trace.Log(__jspt_ctx_8,
 
 			"chan_make",
 			fmt.Sprintf("ptr=%p cap=%d type=%s",
@@ -46,29 +51,30 @@ func RuncrdntrProgram(__jspt_ctx_5 context.Context) {
 	cond := sync.NewCond(&mu)
 	currentPhase := 0
 	arrived := 0
-	__jspt_spawn_7 :=
+	__jspt_spawn_10 :=
 
 	// Coordinator: advances phase when all workers arrive.
 	atomic.AddUint64(&__jspt_spawn_id_2, 1)
-	trace.Log(__jspt_ctx_5,
+	trace.Log(__jspt_ctx_8,
 
 		"spawn_parent",
 		fmt.
 			Sprintf("sid=%d",
 
-				__jspt_spawn_7))
+				__jspt_spawn_10),
+	)
 	__jspt_wg_0.Add(1)
-	go func(__jspt_ctx_10 context.Context,) {
-		trace.WithRegion(__jspt_ctx_10, "goroutine: anon", func() {
+	go func(__jspt_ctx_13 context.Context,) {
+		trace.WithRegion(__jspt_ctx_13, "goroutine: anon", func() {
 			{
 				defer __jspt_wg_0.Done()
-				trace.Log(__jspt_ctx_5,
+				trace.Log(__jspt_ctx_8,
 
 					"spawn_child",
 					fmt.
 						Sprintf("sid=%d",
 
-							__jspt_spawn_7))
+							__jspt_spawn_10))
 
 				for currentPhase < phases {
 					mu.Lock()
@@ -87,33 +93,34 @@ func RuncrdntrProgram(__jspt_ctx_5 context.Context) {
 				close(updates)
 			}
 		})
-	}(__jspt_ctx_5)
+	}(__jspt_ctx_8)
 
 	// Workers: do phase work, send updates, then wait at barrier.
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		wid := w
-		__jspt_spawn_8 := atomic.AddUint64(&__jspt_spawn_id_2, 1)
-		trace.Log(__jspt_ctx_5,
+		__jspt_spawn_11 := atomic.AddUint64(&__jspt_spawn_id_2, 1)
+		trace.Log(__jspt_ctx_8,
 
 			"spawn_parent",
 			fmt.
 				Sprintf("sid=%d",
 
-					__jspt_spawn_8))
+					__jspt_spawn_11),
+		)
 		__jspt_wg_0.Add(1)
-		go func(__jspt_ctx_11 context.Context,) {
-			trace.WithRegion(__jspt_ctx_11, "goroutine: anon", func() {
+		go func(__jspt_ctx_14 context.Context,) {
+			trace.WithRegion(__jspt_ctx_14, "goroutine: anon", func() {
 				{
 					defer __jspt_wg_0.Done()
-					trace.Log(__jspt_ctx_5,
+					trace.Log(__jspt_ctx_8,
 
 						"spawn_child",
 						fmt.
 							Sprintf("sid=%d",
 
-								__jspt_spawn_8))
+								__jspt_spawn_11))
 
 					defer wg.Done()
 					localPhase := 0
@@ -142,49 +149,50 @@ func RuncrdntrProgram(__jspt_ctx_5 context.Context) {
 					}
 				}
 			})
-		}(__jspt_ctx_5)
+		}(__jspt_ctx_8)
 
 	}
-	__jspt_spawn_9 :=
+	__jspt_spawn_12 :=
 
 	// Observer: reads updates concurrently.
 	atomic.AddUint64(&__jspt_spawn_id_2, 1)
-	trace.Log(__jspt_ctx_5,
+	trace.Log(__jspt_ctx_8,
 
 		"spawn_parent",
 		fmt.
 			Sprintf("sid=%d",
 
-				__jspt_spawn_9))
+				__jspt_spawn_12),
+	)
 	__jspt_wg_0.Add(1)
-	go func(__jspt_ctx_12 context.Context,) {
-		trace.WithRegion(__jspt_ctx_12,
+	go func(__jspt_ctx_15 context.Context,) {
+		trace.WithRegion(__jspt_ctx_15,
 
 		// intentionally minimal
 		"goroutine: anon", func() {
 			{
 				defer __jspt_wg_0.Done()
-				trace.Log(__jspt_ctx_5,
+				trace.Log(__jspt_ctx_8,
 
 					"spawn_child",
 					fmt.
 						Sprintf("sid=%d",
 
-							__jspt_spawn_9))
+							__jspt_spawn_12))
 
 				for range updates {
 
 				}
 			}
 		})
-	}(__jspt_ctx_5)
+	}(__jspt_ctx_8)
 
 	wg.Wait()
 	time.Sleep(40 * time.Millisecond)	// let coordinator/observer settle
 	fmt.Println("done")
 }
 func init() {
-	RegisterWorkload("crdntr",
-		RuncrdntrProgram,
+	RegisterWorkload("cndtr",
+		RuncndtrProgram,
 	)
 }

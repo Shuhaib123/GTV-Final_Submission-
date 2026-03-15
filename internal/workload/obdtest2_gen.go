@@ -1,5 +1,5 @@
-//go:build workload_bdcst
-// +build workload_bdcst
+//go:build workload_obdtest2
+// +build workload_obdtest2
 
 package workload
 
@@ -383,15 +383,15 @@ func (c *Client) runClient(__jspt_ctx_16 context.Context, i int, server chan *Re
 	}
 }
 
-func RunbdcstProgram(__jspt_ctx_8 context.Context) {
+func Runobdtest2Program(__jspt_ctx_8 context.Context) {
 	var __jspt_wg_0 sync.WaitGroup
 	defer __jspt_wg_0.Wait()
 	gtvtrace.InstallStopOnSignal()
 	gtvtrace.InstallStopAfterFromEnv(
 		"GTV_TIMEOUT_MS")
-	__jspt_ctx_8, __jspt_task_9 := trace.NewTask(__jspt_ctx_8, "bdcst")
+	__jspt_ctx_8, __jspt_task_9 := trace.NewTask(__jspt_ctx_8, "obdtest2")
 	defer __jspt_task_9.End()
-	trace.Log(__jspt_ctx_8, "main", "bdcst starting")
+	trace.Log(__jspt_ctx_8, "main", "obdtest2 starting")
 
 	s := new(Server)
 	s.join = make(chan *Request, MAX)
@@ -477,7 +477,7 @@ func __jspt_select_send_5[T any](
 	return ch
 }
 func init() {
-	RegisterWorkload("bdcst",
-		RunbdcstProgram,
+	RegisterWorkload("obdtest2",
+		Runobdtest2Program,
 	)
 }

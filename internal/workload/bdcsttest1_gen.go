@@ -1,11 +1,12 @@
-//go:build workload_bdcst
-// +build workload_bdcst
+//go:build workload_bdcsttest1
+// +build workload_bdcsttest1
 
 package workload
 
 import (
 	"context"
 	"fmt"
+	"time"
 
 	// at most 10 clients
 	"jspt/internal/gtvtrace"
@@ -15,7 +16,6 @@ import (
 	// receive-only channel: <-chan
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 var __jspt_spawn_id_2 uint64
@@ -44,16 +44,13 @@ func (s *Server) register(__jspt_ctx_10 context.Context, r *Request) {
 	s.num++
 	if trace.IsEnabled() {
 		trace.Log(__jspt_ctx_10,
-			"value",
-
-			fmt.Sprint(s.clientIn))
+			"value", fmt.
+				Sprint(s.clientIn))
 	}
 	if trace.IsEnabled() {
 		trace.Log(__jspt_ctx_10,
-			"ch_ptr",
-
-			fmt.Sprintf("ptr=%p", r.
-				reg))
+			"ch_ptr", fmt.
+				Sprintf("ptr=%p", r.reg))
 	}
 	trace.WithRegion(__jspt_ctx_10, "worker: send to reg", func() {
 		{
@@ -68,24 +65,19 @@ func (s *Server) broadcast(__jspt_ctx_11 context.Context, msg string) {
 	for i := 0; i < s.num; i++ {
 		if trace.IsEnabled() {
 			trace.Log(__jspt_ctx_11,
-				"value",
-
-				fmt.Sprint(msg))
+				"value", fmt.
+					Sprint(msg))
 		}
 		if trace.IsEnabled() {
 			trace.Log(__jspt_ctx_11,
-				"ch_ptr",
-
-				fmt.Sprintf("ptr=%p", s.
-					clientOut[i]))
+				"ch_ptr", fmt.
+					Sprintf("ptr=%p", s.clientOut[i]))
 		}
 		if trace.IsEnabled() {
 			if trace.IsEnabled() {
 				trace.Log(__jspt_ctx_11,
-					"ch_ptr",
-
-					fmt.Sprintf("ptr=%p", s.
-						clientOut[i]))
+					"ch_ptr", fmt.
+						Sprintf("ptr=%p", s.clientOut[i]))
 			}
 			trace.WithRegion(__jspt_ctx_11, fmt.Sprintf("worker: send to clientout[%v]", i), func() {
 				{
@@ -125,9 +117,8 @@ func (s *Server) runServer(__jspt_ctx_12 context.Context) {
 			"chan_make",
 
 			fmt.Sprintf("ptr=%p cap=%d type=%s",
-				s.clientIn, MAX,
-
-				"string"))
+				s.clientIn, MAX, "string",
+			))
 	}
 	trace.Log(__jspt_ctx_12, "role", "server")
 
@@ -136,13 +127,12 @@ func (s *Server) runServer(__jspt_ctx_12 context.Context) {
 
 		// gtv:recv=join
 		{
-			__jspt_sel_17 := fmt.Sprintf("s%v",
-				time.Now().UnixNano())
+			__jspt_sel_17 := fmt.
+				Sprintf("s%v", time.Now().UnixNano())
 			if trace.IsEnabled() {
 				trace.Log(__jspt_ctx_12,
-					"select",
-
-					"select_begin id="+__jspt_sel_17,
+					"select", "select_begin id="+
+						__jspt_sel_17,
 				)
 			}
 
@@ -153,68 +143,78 @@ func (s *Server) runServer(__jspt_ctx_12 context.Context) {
 				"server: receive from "+"join", s.join):
 				if trace.IsEnabled() {
 					trace.Log(__jspt_ctx_12,
-						"select",
+						"select", fmt.
+							Sprintf("select_chosen id=%s idx=0",
+								__jspt_sel_17))
+				}
+				if trace.IsEnabled() {
+					trace.Log(__jspt_ctx_12,
+						"select", fmt.
+							Sprintf("select_case id=%s idx=0 kind=recv ptr=%p name=%q",
 
-						"select_chosen id="+__jspt_sel_17,
-					)
+								__jspt_sel_17, s.join,
+								"server: receive from "+"join",
+							))
 				}
 				if trace.IsEnabled() {
 					trace.Log(__jspt_ctx_12,
 						"select_recv",
 
-						fmt.Sprintf("ptr=%p name=%s",
+						fmt.Sprintf("ptr=%p name=%q",
 							s.join, "server: receive from "+
 								"join"))
 				}
-				trace.Log(__jspt_ctx_12, "role", "server")
+				trace.WithRegion(__jspt_ctx_12, "server: receive from "+"join", func() {
+					{
+						trace.Log(__jspt_ctx_12, "role", "server")
 
-				r = __jspt_recv_18
+						r = __jspt_recv_18
 
-				s.register(__jspt_ctx_12, r)
+						s.register(__jspt_ctx_12, r)
+						if trace.IsEnabled() {
+							trace.Log(__jspt_ctx_12,
+								"value", fmt.
+									Sprint(__jspt_recv_18))
+						}
+					}
+				})
+
+			case __jspt_recv_19 := <-__jspt_recv_in_region_4(__jspt_ctx_12,
+
+				// Terminate after broadcast
+				"server: receive from "+"clientin", s.clientIn):
 				if trace.IsEnabled() {
 					trace.Log(__jspt_ctx_12,
-						"value",
-
-						fmt.Sprint(__jspt_recv_18))
+						"select", fmt.
+							Sprintf("select_chosen id=%s idx=1",
+								__jspt_sel_17))
 				}
-
-			case __jspt_recv_19 := <-__jspt_recv_in_region_4(__jspt_ctx_12, "server: receive from "+
-
-				// client ID
-				"clientin", s.clientIn):
 				if trace.IsEnabled() {
 					trace.Log(__jspt_ctx_12,
-						"select",
+						"select", fmt.
+							Sprintf("select_case id=%s idx=1 kind=recv ptr=%p name=%q",
 
-						"select_chosen id="+__jspt_sel_17,
-					)
+								__jspt_sel_17, s.clientIn,
+								"server: receive from "+
+									"clientin"))
 				}
 				if trace.IsEnabled() {
 					trace.Log(__jspt_ctx_12,
 						"select_recv",
 
-						fmt.Sprintf("ptr=%p name=%s",
+						fmt.Sprintf("ptr=%p name=%q",
 							s.clientIn, "server: receive from "+
-								"clientin",
-						))
+								"clientin"))
 				}
 
 				msg = __jspt_recv_19
 				s.broadcast(__jspt_ctx_12, msg)
-				if trace.IsEnabled() {
-					trace.Log(__jspt_ctx_12,
-						"value",
-
-						fmt.Sprint(__jspt_recv_19))
-				}
-
+				return
 			}
 			if trace.IsEnabled() {
 				trace.Log(__jspt_ctx_12,
-					"select",
-
-					"select_end id="+__jspt_sel_17,
-				)
+					"select", "select_end id="+
+						__jspt_sel_17)
 			}
 		}
 
@@ -222,6 +222,7 @@ func (s *Server) runServer(__jspt_ctx_12 context.Context) {
 }
 
 type Client struct {
+	// client ID
 	num int
 	// channel for receipt of serverOut from server
 	join chan chan<- string
@@ -238,9 +239,9 @@ func (c *Client) register(__jspt_ctx_13 context.Context, server chan *Request) {
 			"chan_make",
 
 			fmt.Sprintf("ptr=%p cap=%d type=%s",
-				c.serverIn, 1,
-				"string",
-			))
+				c.serverIn, 1, "string",
+			),
+		)
 	}
 
 	c.join = make(chan chan<- string, 1)
@@ -256,15 +257,13 @@ func (c *Client) register(__jspt_ctx_13 context.Context, server chan *Request) {
 	request := &Request{c.join, c.serverIn}
 	if trace.IsEnabled() {
 		trace.Log(__jspt_ctx_13,
-			"value",
-
-			fmt.Sprint(request))
+			"value", fmt.
+				Sprint(request))
 	}
 	if trace.IsEnabled() {
 		trace.Log(__jspt_ctx_13,
-			"ch_ptr",
-
-			fmt.Sprintf("ptr=%p", server))
+			"ch_ptr", fmt.
+				Sprintf("ptr=%p", server))
 	}
 	trace.WithRegion(__jspt_ctx_13, "worker: send to join", func() {
 		{
@@ -280,16 +279,13 @@ func (c *Client) broadcast(__jspt_ctx_14 context.
 	Context, msg string) {
 	if trace.IsEnabled() {
 		trace.Log(__jspt_ctx_14,
-			"value",
-
-			fmt.Sprint(msg))
+			"value", fmt.
+				Sprint(msg))
 	}
 	if trace.IsEnabled() {
 		trace.Log(__jspt_ctx_14,
-			"ch_ptr",
-
-			fmt.Sprintf("ptr=%p", c.
-				serverOut))
+			"ch_ptr", fmt.
+				Sprintf("ptr=%p", c.serverOut))
 	}
 	trace.WithRegion(__jspt_ctx_14, "worker: send to clientin", func() {
 		{
@@ -334,64 +330,58 @@ func (c *Client) runClient(__jspt_ctx_16 context.Context, i int, server chan *Re
 				trace.Log(__jspt_ctx_16,
 					"select_recv",
 
-					fmt.Sprintf("ptr=%p name=%s",
+					fmt.Sprintf("ptr=%p name=%q",
 						c.join, "client: receive from "+
 							"join"))
 			}
+			trace.WithRegion(__jspt_ctx_16, "client: receive from "+"join", func() {
+				{
 
-			c.serverOut = __jspt_recv_20
-			if trace.IsEnabled() {
-				trace.Log(__jspt_ctx_16,
-					"value",
+					c.serverOut = __jspt_recv_20
+					if trace.IsEnabled() {
+						trace.Log(__jspt_ctx_16,
+							"value", fmt.
+								Sprint(__jspt_recv_20))
+					}
+				}
+			})
 
-					fmt.Sprint(__jspt_recv_20))
-			}
+		case __jspt_recv_21 := <-__jspt_recv_in_region_4(__jspt_ctx_16,
 
-		case __jspt_recv_21 := <-__jspt_recv_in_region_4(
-
-			// received = true
-			__jspt_ctx_16, "client: receive from "+"serverin", c.serverIn):
+			// Terminate after receiving message
+			"client: receive from "+"serverin", c.serverIn):
 			if trace.IsEnabled() {
 				trace.Log(__jspt_ctx_16,
 					"select_recv",
 
-					fmt.Sprintf("ptr=%p name=%s",
+					fmt.Sprintf("ptr=%p name=%q",
 						c.serverIn, "client: receive from "+
-							"serverin",
-					))
+							"serverin"))
 			}
 
 			msg = __jspt_recv_21
 			c.output(__jspt_ctx_16, msg)
-			if trace.IsEnabled() {
-				trace.Log(__jspt_ctx_16,
-					"value",
-
-					fmt.Sprint(__jspt_recv_21))
-			}
-
+			return
 		default:
 			if c.num == 1 && c.serverOut != nil && !sent {
+				// Wait a bit to ensure others might have joined (heuristic)
+				time.Sleep(100 * time.Millisecond)
 				c.broadcast(__jspt_ctx_16, "Hello World")
 				sent = true
 			}
-			time.
-				Sleep(1 *
-					time.Millisecond)
-
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
 
-func RunbdcstProgram(__jspt_ctx_8 context.Context) {
+func Runbdcsttest1Program(__jspt_ctx_8 context.Context) {
 	var __jspt_wg_0 sync.WaitGroup
 	defer __jspt_wg_0.Wait()
 	gtvtrace.InstallStopOnSignal()
-	gtvtrace.InstallStopAfterFromEnv(
-		"GTV_TIMEOUT_MS")
-	__jspt_ctx_8, __jspt_task_9 := trace.NewTask(__jspt_ctx_8, "bdcst")
+	gtvtrace.InstallStopAfterFromEnv("GTV_TIMEOUT_MS")
+	__jspt_ctx_8, __jspt_task_9 := trace.NewTask(__jspt_ctx_8, "bdcsttest1")
 	defer __jspt_task_9.End()
-	trace.Log(__jspt_ctx_8, "main", "bdcst starting")
+	trace.Log(__jspt_ctx_8, "main", "bdcsttest1 starting")
 
 	s := new(Server)
 	s.join = make(chan *Request, MAX)
@@ -400,8 +390,8 @@ func RunbdcstProgram(__jspt_ctx_8 context.Context) {
 			"chan_make",
 
 			fmt.Sprintf("ptr=%p cap=%d type=%s",
-				s.join, MAX, "*Request",
-			))
+				s.join, MAX, "*Request"),
+		)
 	}
 
 	fmt.Println("Starting up clients...")
@@ -412,9 +402,9 @@ func RunbdcstProgram(__jspt_ctx_8 context.Context) {
 
 			"spawn_parent",
 
-			fmt.Sprintf("sid=%d",
-				__jspt_spawn_22,
-			))
+			fmt.
+				Sprintf("sid=%d", __jspt_spawn_22),
+		)
 		__jspt_wg_0.Add(1)
 		go func(__jspt_ctx_23 context.Context) {
 			trace.WithRegion(__jspt_ctx_23, "goroutine: anon", func() {
@@ -424,9 +414,8 @@ func RunbdcstProgram(__jspt_ctx_8 context.Context) {
 
 						"spawn_child",
 
-						fmt.Sprintf("sid=%d",
-							__jspt_spawn_22,
-						))
+						fmt.
+							Sprintf("sid=%d", __jspt_spawn_22))
 
 					c.runClient(__jspt_ctx_8, i, s.join)
 				}
@@ -436,48 +425,47 @@ func RunbdcstProgram(__jspt_ctx_8 context.Context) {
 	s.runServer(__jspt_ctx_8)
 }
 func __jspt_select_recv_3[T any](__jspt_ctx_24 context.Context, label string, ch <-chan T) <-chan T {
-	if trace.
-		IsEnabled() {
-		trace.Log(__jspt_ctx_24, "ch_ptr",
-			fmt.Sprintf("ptr=%p",
-
-				ch))
+	if trace.IsEnabled() {
 		trace.Log(__jspt_ctx_24,
+			"ch_ptr", fmt.Sprintf("ptr=%p", ch))
 
-			"ch_name", fmt.Sprintf("ptr=%p name=%s", ch,
-				label))
+		trace.Log(__jspt_ctx_24,
+			"ch_name",
+			fmt.Sprintf("ptr=%p name=%s", ch, label))
 	}
 	return ch
 }
-func __jspt_recv_in_region_4[T any](__jspt_ctx_24 context.Context, label string, ch <-chan T) <-chan T {
+func __jspt_recv_in_region_4[T any](__jspt_ctx_24 context.Context,
+	label string, ch <-chan T) <-chan T {
 	if trace.IsEnabled() {
-		trace.
-			Log(__jspt_ctx_24, "ch_ptr", fmt.Sprintf("ptr=%p", ch))
+		trace.Log(
+			__jspt_ctx_24,
+			"ch_ptr", fmt.Sprintf("ptr=%p",
+				ch))
 		trace.Log(__jspt_ctx_24,
-			"ch_name",
-			fmt.Sprintf("ptr=%p name=%s",
+
+			"ch_name", fmt.Sprintf("ptr=%p name=%s",
 
 				ch, label))
 	}
 	return ch
 }
-func __jspt_select_send_5[T any](
-	__jspt_ctx_24 context.Context, label string, ch chan<- T) chan<- T {
-	if trace.
-		IsEnabled() {
+func __jspt_select_send_5[T any](__jspt_ctx_24 context.Context, label string, ch chan<- T) chan<- T {
+	if trace.IsEnabled() {
 		trace.Log(__jspt_ctx_24,
-			"ch_ptr",
-			fmt.Sprintf("ptr=%p", ch))
+			"ch_ptr", fmt.
+				Sprintf("ptr=%p",
+
+					ch))
 		trace.Log(__jspt_ctx_24,
 			"ch_name",
-			fmt.Sprintf("ptr=%p name=%s",
-				ch,
-				label))
+			fmt.Sprintf("ptr=%p name=%s", ch, label))
 	}
 	return ch
 }
 func init() {
-	RegisterWorkload("bdcst",
-		RunbdcstProgram,
+	RegisterWorkload("bdcsttest1",
+
+		Runbdcsttest1Program,
 	)
 }
