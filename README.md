@@ -10,8 +10,6 @@ It includes an instrumenter, a shared trace processor, and two graph viewers wit
 ## Current Pipeline
 
 ```mermaid
-
-```mermaid
 flowchart LR
   A["Go Workload Source"] --> B["Instrumentation (optional)<br/>internal/instrumenter"]
   A --> C["Run Go Binary"]
