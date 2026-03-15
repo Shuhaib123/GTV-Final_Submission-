@@ -1,5 +1,22 @@
 # Go Trace Visualizer (GTV)
 
+## Summary
+
+**Go Trace Visualizer (GTV)** is a synchronization-aware visualization and analysis system for Go concurrency. It instruments workloads, processes `runtime/trace` data through a shared semantic pipeline, and renders execution as a layered topology in both live and offline viewers.
+
+Its core strengths are:
+
+* a dual live/offline replay model
+* first-class synchronization handling
+* shared trace processing logic
+* instrumentation-aware workload generation
+* teaching-friendly and debug-friendly views
+* browser-based topology exploration with narration and filtering
+
+In short, GTV is a project for making concurrent Go execution easier to **see, explain, and debug**.
+
+---
+
 ## Table of Contents
 
 * [Overview](#overview)
@@ -789,20 +806,5 @@ Researchers and engineers interested in trace-driven program understanding or se
 
 ---
 
-## Summary
 
-**Go Trace Visualizer (GTV)** is a synchronization-aware visualization and analysis system for Go concurrency. It instruments workloads, processes `runtime/trace` data through a shared semantic pipeline, and renders execution as a layered topology in both live and offline viewers.
-
-Its core strengths are:
-
-* a dual live/offline replay model
-* first-class synchronization handling
-* shared trace processing logic
-* instrumentation-aware workload generation
-* teaching-friendly and debug-friendly views
-* browser-based topology exploration with narration and filtering
-
-In short, GTV is a project for making concurrent Go execution easier to **see, explain, and debug**.
-
----
 
